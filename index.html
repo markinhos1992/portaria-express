@@ -1,0 +1,2323 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <title>Portaria Express</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>* { margin:0; padding:0; box-sizing:border-box; } body { background:#0f1117; } #root { height:100dvh; }</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+// ─── SUPABASE CONFIG ──────────────────────────────────────────────────────────
+// ⚠️ Passo 3: Cole seus dados aqui após criar o projeto no Supabase
+// Project Settings → API → copie "Project URL" e "anon public"
+const SUPABASE_URL = "https://uilesmexlfojvsgbkhvr.supabase.co";
+const SUPABASE_KEY = "sb_publishable_V-HBvWLH1JsAjsy4wJfx9A_wN139-au";
+
+const DB_OK = !SUPABASE_URL.includes("COLE");
+
+// ─── IA CONFIG ────────────────────────────────────────────────────────────────
+// Suporta Anthropic (sk-ant-...) ou DeepSeek (sk-...)
+// Cole sua key aqui ou configure pela tela de Configurações no app
+const ANTHROPIC_KEY_CONFIG = "COLE_SUA_KEY_AQUI";
+
+const getAnthropicKey = () => {
+  if(!ANTHROPIC_KEY_CONFIG.includes("COLE")) return ANTHROPIC_KEY_CONFIG;
+  try { return localStorage.getItem("px_anthropic_key") || ""; } catch { return ""; }
+};
+
+const getIAProvider = (key) => {
+  if(!key) return null;
+  if(key.startsWith("sk-ant-")) return "anthropic";
+  if(key.startsWith("AIza")) return "gemini";
+  if(key.startsWith("sk-")) return "deepseek";
+  return null;
+};
+
+// Cliente Supabase via fetch puro (sem instalar pacote)
+const db = {
+  async getAll(table) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?order=criado_em.desc`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+    });
+    return r.ok ? r.json() : [];
+  },
+  async insert(table, row) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", Prefer: "return=representation" },
+      body: JSON.stringify(row)
+    });
+    const data = await r.json();
+    return r.ok ? (Array.isArray(data) ? data[0] : data) : null;
+  },
+  async update(table, id, row) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
+      method: "PATCH",
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", Prefer: "return=representation" },
+      body: JSON.stringify(row)
+    });
+    const data = await r.json();
+    return r.ok ? (Array.isArray(data) ? data[0] : data) : null;
+  },
+};
+
+// ─── OFFLINE CACHE ────────────────────────────────────────────────────────────
+const CACHE_KEY = "px_enc_cache";
+const cache = {
+  save(data) { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ts: Date.now(), data})); } catch {} },
+  load() { try { const s = localStorage.getItem(CACHE_KEY); return s ? JSON.parse(s) : null; } catch { return null; } },
+  clear() { try { localStorage.removeItem(CACHE_KEY); } catch {} },
+};
+
+// Wrapper do db com suporte offline
+const dbSafe = {
+  async getAll(table) {
+    try {
+      const data = await db.getAll(table);
+      if (Array.isArray(data) && data.length >= 0) {
+        cache.save(data);
+        return { data, offline: false };
+      }
+      throw new Error("empty");
+    } catch {
+      const cached = cache.load();
+      if (cached) return { data: cached.data, offline: true, ts: cached.ts };
+      return { data: [], offline: true, ts: null };
+    }
+  },
+  async insert(table, row) {
+    try { return await db.insert(table, row); }
+    catch { return null; }
+  },
+  async update(table, id, row) {
+    try { return await db.update(table, id, row); }
+    catch { return null; }
+  },
+};
+
+
+const today = new Date();
+const fmtISO = (off=0) => { const d=new Date(); d.setDate(d.getDate()-off); return d.toISOString(); };
+const gp = (n,iso) => { const d=new Date(iso); return `PX-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${String(n).padStart(4,'0')}`; };
+
+const MOCK_MORADORES = [];
+
+const MOCK_ENCOMENDAS = [];
+
+const MOCK_LOGS = [];
+
+const USERS = [
+  { id:1, login:"admin", senha:"123456", perfil:"admin", nome:"Administrador" },
+];
+
+
+// ─── PERMISSÕES ───────────────────────────────────────────────────────────────
+const PERMS = {
+  admin:    ["dashboard","encomendas","retirada","moradores","usuarios","notificacoes","relatorios","logs","configuracoes"],
+  porteiro: ["dashboard","encomendas","retirada","moradores","notificacoes","relatorios","logs"],
+};
+const READONLY = {
+  porteiro: ["moradores","relatorios","logs"],
+};
+const canAccess = (perfil, page) => (PERMS[perfil]||[]).includes(page);
+const isReadonly = (perfil, page) => (READONLY[perfil]||[]).includes(page);
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+const fmtDate  = iso => !iso ? "—" : new Date(iso).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
+const fmtShort = iso => !iso ? "—" : new Date(iso).toLocaleDateString("pt-BR");
+const isToday  = iso => { if(!iso) return false; const d=new Date(iso),t=new Date(); return d.getDate()===t.getDate()&&d.getMonth()===t.getMonth()&&d.getFullYear()===t.getFullYear(); };
+const getDias  = iso => Math.floor((Date.now()-new Date(iso))/86400000);
+const simil    = (a,b) => { a=a.toLowerCase();b=b.toLowerCase();let m=0;const wa=a.split(" "),wb=b.split(" ");wa.forEach(w=>{if(wb.some(x=>x.includes(w)||w.includes(x)))m++;});return m/Math.max(wa.length,1); };
+const makeProto= () => { const d=new Date(); return `PX-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${String(Math.floor(Math.random()*9000)+1000).padStart(4,'0')}`; };
+const doExport = (data,name) => {
+  if(!data.length) return;
+  const keys=Object.keys(data[0]);
+  const rows=[keys.join(","),...data.map(r=>keys.map(k=>`"${String(r[k]||"").replace(/"/g,'""')}"`).join(","))];
+  const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([rows.join("\n")],{type:"text/csv"})); a.download=name; a.click();
+};
+
+// ─── STYLES ───────────────────────────────────────────────────────────────────
+const Styles = () => (
+  <style>{`
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Sora:wght@400;500;600;700&display=swap');
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#0f1117;--sf:#171c27;--s2:#1e2535;--s3:#252d40;
+      --b1:#2a3349;--b2:#334060;
+      --ac:#f59e0b;--ac2:#fbbf24;--ad:#f59e0b22;
+      --gn:#10b981;--gd:#10b98122;--rd:#ef4444;--rdd:#ef444422;--bl:#3b82f6;--bld:#3b82f622;
+      --t1:#e8eaf0;--t2:#8b93a8;--t3:#5a6278;
+      --fn:'Plus Jakarta Sans',sans-serif;--fn2:'Sora',sans-serif;
+      --r:12px;--rs:8px;
+    }
+    html,body,#root{height:100%;background:var(--bg);font-family:var(--fn);color:var(--t1)}
+    input,select,textarea,button{font-family:var(--fn);outline:none}
+    button{cursor:pointer;border:none}
+    ::-webkit-scrollbar{width:5px;height:5px}
+    ::-webkit-scrollbar-track{background:var(--sf)}
+    ::-webkit-scrollbar-thumb{background:var(--b2);border-radius:99px}
+    .app{display:flex;height:100vh;overflow:hidden}
+    /* SIDEBAR */
+    .sb{width:240px;min-width:240px;background:var(--sf);border-right:1px solid var(--b1);display:flex;flex-direction:column}
+    .sb-logo{padding:24px 20px 20px;border-bottom:1px solid var(--b1)}
+    .sb-logo h1{font-family:var(--fn2);font-size:18px;font-weight:700}
+    .sb-logo h1 span{color:var(--ac)}
+    .sb-logo p{font-size:11px;color:var(--t3);margin-top:3px}
+    .sb-nav{flex:1;padding:16px 12px;overflow-y:auto}
+    .nsec{font-size:10px;font-weight:700;color:var(--t3);letter-spacing:1.2px;text-transform:uppercase;padding:0 8px;margin:16px 0 8px}
+    .ni{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--rs);cursor:pointer;transition:all .15s;color:var(--t2);font-size:13.5px;font-weight:500;margin-bottom:2px;border:1px solid transparent}
+    .ni:hover{background:var(--s2);color:var(--t1)}
+    .ni.on{background:var(--ad);color:var(--ac);border-color:#f59e0b33}
+    .ni svg{width:17px;height:17px;flex-shrink:0}
+    .sb-usr{padding:16px;border-top:1px solid var(--b1)}
+    .sb-usr-row{display:flex;align-items:center;gap:10px}
+    .av{width:34px;height:34px;border-radius:99px;background:var(--ad);border:1.5px solid var(--ac);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:var(--ac);flex-shrink:0}
+    .av-info p{font-size:13px;font-weight:600}
+    .av-info span{font-size:11px;color:var(--t3);text-transform:capitalize}
+    .logbtn{margin-top:8px;width:100%;padding:8px;border-radius:var(--rs);background:var(--rdd);border:1px solid #ef444433;color:var(--rd);font-size:12px;font-weight:600;transition:all .15s}
+    .logbtn:hover{background:#ef444433}
+    /* MAIN */
+    .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+    .topbar{padding:16px 28px;border-bottom:1px solid var(--b1);background:var(--sf);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+    .topbar h2{font-family:var(--fn2);font-size:18px;font-weight:600}
+    .topbar p{font-size:12px;color:var(--t3);margin-top:2px}
+    .pg{flex:1;overflow-y:auto;padding:24px 28px}
+    /* BANNER */
+    .dbb{background:#f59e0b15;border:1.5px solid #f59e0b44;border-radius:var(--rs);padding:12px 16px;margin-bottom:20px;display:flex;align-items:center;gap:10px;font-size:13px;color:var(--ac)}
+    .dbb svg{width:16px;height:16px;flex-shrink:0}
+    .dbb strong{font-weight:700}
+    .dbb-ok{background:var(--gd);border-color:#10b98144;color:var(--gn)}
+    /* STATS */
+    .sg{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px;margin-bottom:24px}
+    .sc{background:var(--sf);border:1px solid var(--b1);border-radius:var(--r);padding:20px;display:flex;align-items:flex-start;gap:14px}
+    .sc:hover{border-color:var(--b2)}
+    .sc-icon{width:42px;height:42px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .sc-icon svg{width:20px;height:20px}
+    .sc h3{font-size:22px;font-weight:700;font-family:var(--fn2)}
+    .sc p{font-size:12px;color:var(--t2);margin-top:2px}
+    /* CARD */
+    .card{background:var(--sf);border:1px solid var(--b1);border-radius:var(--r);overflow:hidden;margin-bottom:20px}
+    .ch{padding:16px 20px;border-bottom:1px solid var(--b1);display:flex;align-items:center;justify-content:space-between}
+    .ch h3{font-size:14px;font-weight:600}
+    .ch p{font-size:12px;color:var(--t3)}
+    .tw{overflow-x:auto}
+    table{width:100%;border-collapse:collapse}
+    th{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.6px;padding:10px 16px;text-align:left;border-bottom:1px solid var(--b1);white-space:nowrap}
+    td{font-size:13px;color:var(--t2);padding:12px 16px;border-bottom:1px solid #1e2535;vertical-align:middle}
+    tr:last-child td{border-bottom:none}
+    tr:hover td{background:#ffffff04}
+    td strong{color:var(--t1);font-weight:500}
+    /* BADGE */
+    .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:99px;font-size:11px;font-weight:600;white-space:nowrap}
+    .by{background:var(--ad);color:var(--ac);border:1px solid #f59e0b33}
+    .bg{background:var(--gd);color:var(--gn);border:1px solid #10b98133}
+    .br{background:var(--rdd);color:var(--rd);border:1px solid #ef444433}
+    .bb{background:var(--bld);color:var(--bl);border:1px solid #3b82f633}
+    /* BTN */
+    .btn{display:inline-flex;align-items:center;gap:7px;padding:8px 16px;border-radius:var(--rs);font-size:13px;font-weight:600;transition:all .15s;white-space:nowrap}
+    .btn svg{width:14px;height:14px}
+    .bp{background:var(--ac);color:#0f1117} .bp:hover{background:var(--ac2)}
+    .bs{background:var(--s2);color:var(--t1);border:1px solid var(--b2)} .bs:hover{background:var(--s3)}
+    .bg2{background:transparent;color:var(--t2);border:1px solid var(--b1)} .bg2:hover{color:var(--t1);background:var(--s2)}
+    .bd{background:var(--rdd);color:var(--rd);border:1px solid #ef444433} .bd:hover{background:#ef444433}
+    .bgr{background:var(--gd);color:var(--gn);border:1px solid #10b98133} .bgr:hover{background:#10b98133}
+    .bsm{padding:5px 10px;font-size:12px}
+    .blg{padding:12px 24px;font-size:15px;border-radius:var(--r)}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    /* INPUT */
+    .f{margin-bottom:16px}
+    .f label{display:block;font-size:12px;font-weight:600;color:var(--t2);margin-bottom:6px;letter-spacing:.3px}
+    .inp{width:100%;padding:10px 14px;background:var(--s2);border:1.5px solid var(--b2);border-radius:var(--rs);color:var(--t1);font-size:13.5px;transition:border-color .15s}
+    .inp:focus{border-color:var(--ac)}
+    .inp::placeholder{color:var(--t3)}
+    textarea.inp{resize:vertical;min-height:80px}
+    .r2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .r3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+    /* MODAL */
+    .ov{position:fixed;inset:0;background:#00000088;z-index:100;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(4px)}
+    .modal{background:var(--sf);border:1px solid var(--b2);border-radius:16px;width:100%;max-width:560px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px #00000055}
+    .mw{max-width:720px}
+    .mh{padding:20px 24px;border-bottom:1px solid var(--b1);display:flex;align-items:center;justify-content:space-between}
+    .mh h3{font-size:16px;font-weight:700;font-family:var(--fn2)}
+    .mb{padding:24px}
+    .mf{padding:16px 24px;border-top:1px solid var(--b1);display:flex;justify-content:flex-end;gap:10px}
+    .xb{width:32px;height:32px;border-radius:99px;background:var(--s2);border:1px solid var(--b1);color:var(--t2);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+    .xb:hover{color:var(--t1)}
+    /* SEARCH BAR */
+    .sbar{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+    .sw{position:relative;flex:1;min-width:200px}
+    .sw svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--t3);pointer-events:none}
+    .sw .inp{padding-left:36px}
+    /* UPLOAD */
+    .uz{border:2px dashed var(--b2);border-radius:var(--r);padding:28px;text-align:center;cursor:pointer;transition:all .15s}
+    .uz:hover{border-color:var(--ac);background:var(--ad)}
+    .uz p{color:var(--t3);font-size:13px}
+    .uz svg{width:28px;height:28px;color:var(--t3);margin:0 auto 10px;display:block}
+    .prev{width:100%;max-height:180px;object-fit:contain;border-radius:var(--rs);background:#00000033;margin-top:10px}
+    /* OCR */
+    .ocr{background:var(--s2);border:1px solid var(--b1);border-radius:var(--rs);padding:14px;margin-bottom:16px}
+    .ocr-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+    .ocr-lbl{font-size:11px;color:var(--t3);min-width:90px;flex-shrink:0}
+    .ocr-val{font-size:13px;color:var(--ac);font-weight:500}
+    /* AI */
+    .aib{background:linear-gradient(135deg,#1e2535,#252d40);border:1.5px solid #f59e0b44;border-radius:var(--r);padding:16px;margin-bottom:16px}
+    .aih{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+    .ait{background:var(--ad);border:1px solid #f59e0b44;color:var(--ac);font-size:10px;font-weight:700;letter-spacing:1px;padding:2px 8px;border-radius:99px}
+    .ais{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#00000022;border-radius:var(--rs);margin-bottom:8px;cursor:pointer;border:1px solid transparent;transition:all .15s}
+    .ais:hover{border-color:var(--ac);background:var(--ad)}
+    .ais strong{font-size:13px;color:var(--t1)}
+    .ais span{font-size:11px;color:var(--t3)}
+    .aisc{background:var(--ad);color:var(--ac);font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px;margin-left:auto;flex-shrink:0}
+    /* NOTIFY */
+    .notif{background:var(--gd);border:1px solid #10b98133;border-radius:var(--rs);padding:16px;margin-top:16px}
+    .notif p{font-size:13px;color:var(--gn);margin-bottom:10px}
+    .notif code{display:block;background:#00000033;padding:10px 12px;border-radius:6px;font-size:12px;color:#a7f3d0;word-break:break-all;margin-bottom:10px}
+    /* LOGIN */
+    .lp{height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg)}
+    .lbg{position:absolute;inset:0;background:radial-gradient(ellipse at 30% 50%,#f59e0b0d,transparent 60%),radial-gradient(ellipse at 70% 20%,#3b82f60a,transparent 50%);pointer-events:none}
+    .lc{background:var(--sf);border:1px solid var(--b2);border-radius:20px;padding:40px;width:100%;max-width:400px;position:relative;z-index:1;box-shadow:0 8px 40px #00000055}
+    .li{width:56px;height:56px;background:var(--ad);border:2px solid var(--ac);border-radius:16px;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:24px}
+    /* MISC */
+    .empty{text-align:center;padding:48px 20px}
+    .empty svg{width:40px;height:40px;color:var(--t3);margin:0 auto 12px;display:block}
+    .empty p{color:var(--t3);font-size:14px}
+    .spin{width:18px;height:18px;border:2px solid var(--b2);border-top-color:var(--ac);border-radius:50%;animation:sp .7s linear infinite;display:inline-block;vertical-align:middle}
+    @keyframes sp{to{transform:rotate(360deg)}}
+    .dok{background:var(--gd);color:var(--gn);font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px}
+    .dw{background:var(--ad);color:var(--ac);font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px}
+    .dd{background:var(--rdd);color:var(--rd);font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px}
+    /* PAGINATION */
+    .pgn{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-top:1px solid var(--b1);flex-wrap:wrap;gap:10px}
+    .pgn-info{font-size:12px;color:var(--t3)}
+    .pgn-btns{display:flex;align-items:center;gap:4px}
+    .pgn-btn{width:32px;height:32px;border-radius:var(--rs);background:var(--s2);border:1px solid var(--b1);color:var(--t2);font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s}
+    .pgn-btn:hover:not(:disabled){background:var(--s3);color:var(--t1)}
+    .pgn-btn.on{background:var(--ac);color:#0f1117;border-color:var(--ac)}
+    .pgn-btn:disabled{opacity:.35;cursor:not-allowed}
+    .pgn-size{padding:5px 8px;background:var(--s2);border:1px solid var(--b1);border-radius:var(--rs);color:var(--t1);font-size:12px;font-family:var(--fn)}
+    /* OFFLINE BANNER */
+    .offbanner{background:#f59e0b18;border:1.5px solid #f59e0b55;border-radius:var(--rs);padding:10px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px;font-size:13px;color:var(--ac);animation:fadeIn .3s ease}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+    .offbanner svg{width:16px;height:16px;flex-shrink:0}
+    /* SCANNER */
+    .scan-wrap{position:relative;border-radius:var(--r);overflow:hidden;background:#000;margin-bottom:12px}
+    .scan-video{width:100%;max-height:260px;object-fit:cover;display:block}
+    .scan-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+    .scan-frame{width:220px;height:140px;border:2px solid var(--ac);border-radius:8px;position:relative;box-shadow:0 0 0 9999px #00000066}
+    .scan-line{position:absolute;left:0;right:0;height:2px;background:var(--ac);animation:scanMove 2s linear infinite;box-shadow:0 0 8px var(--ac)}
+    @keyframes scanMove{0%{top:0}50%{top:100%}100%{top:0}}
+    .scan-corner{position:absolute;width:16px;height:16px;border-color:var(--ac);border-style:solid}
+    .scan-corner.tl{top:-2px;left:-2px;border-width:3px 0 0 3px}
+    .scan-corner.tr{top:-2px;right:-2px;border-width:3px 3px 0 0}
+    .scan-corner.bl{bottom:-2px;left:-2px;border-width:0 0 3px 3px}
+    .scan-corner.br{bottom:-2px;right:-2px;border-width:0 3px 3px 0}
+    .scan-result{background:var(--gd);border:1px solid #10b98133;border-radius:var(--rs);padding:10px 14px;margin-bottom:10px;font-size:13px;color:var(--gn);display:flex;align-items:center;gap:8px}
+    .scan-tabs{display:flex;gap:6px;margin-bottom:14px}
+    .scan-tab{flex:1;padding:10px;border-radius:var(--rs);font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid var(--b1);background:var(--s2);color:var(--t2);text-align:center;transition:all .15s}
+    .scan-tab.on{border-color:var(--ac);background:var(--ad);color:var(--ac)}
+    /* MOBILE BOTTOM NAV */
+    .mob-nav{display:none;position:fixed;bottom:0;left:0;right:0;background:var(--sf);border-top:1px solid var(--b1);z-index:50;padding:6px 0}
+    .mob-nav-inner{display:flex;justify-content:space-around}
+    .mob-ni{display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 8px;cursor:pointer;color:var(--t3);font-size:9px;font-weight:600;flex:1;border-radius:var(--rs);transition:all .15s}
+    .mob-ni svg{width:22px;height:22px}
+    .mob-ni.on{color:var(--ac)}
+    .hbtn{display:flex;width:36px;height:36px;border-radius:var(--rs);background:var(--s2);border:1px solid var(--b1);color:var(--t2);align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+    .hbtn svg{width:18px;height:18px}
+    /* QUICK MENU */
+    .qm-wrap{position:relative}
+    .qm{position:absolute;top:calc(100% + 8px);left:0;background:var(--sf);border:1px solid var(--b2);border-radius:var(--r);min-width:240px;box-shadow:0 8px 32px #00000055;z-index:200;overflow:hidden;animation:qmIn .15s ease}
+    @keyframes qmIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+    .qm-title{font-size:10px;font-weight:700;color:var(--t3);letter-spacing:1px;text-transform:uppercase;padding:12px 16px 6px}
+    .qm-item{display:flex;align-items:center;gap:12px;padding:11px 16px;cursor:pointer;transition:background .12s;color:var(--t2);font-size:13px;font-weight:500}
+    .qm-item:hover{background:var(--s2);color:var(--t1)}
+    .qm-item svg{width:16px;height:16px;flex-shrink:0}
+    .qm-icon{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .qm-icon svg{width:15px;height:15px}
+    .qm-sep{height:1px;background:var(--b1);margin:4px 0}
+    .sb-ov{display:none;position:fixed;inset:0;background:#00000066;z-index:40}
+    .sb-ov.show{display:block}
+    @media(max-width:1024px){
+      .sb{width:200px;min-width:200px}
+      .pg{padding:20px 16px}
+      .topbar{padding:14px 16px}
+      .r3{grid-template-columns:1fr 1fr}
+    }
+    @media(max-width:767px){
+      .sb{position:fixed;left:0;top:0;bottom:0;z-index:45;transform:translateX(-100%);transition:transform .25s;width:260px!important;min-width:260px!important}
+      .sb.open{transform:translateX(0)}
+      .mob-nav{display:block}
+      .main{height:100vh}
+      .pg{padding:16px 12px;padding-bottom:84px}
+      .topbar{padding:12px 14px}
+      .topbar p{display:none}
+      .sg{grid-template-columns:1fr 1fr}
+      .r2,.r3{grid-template-columns:1fr}
+      .tw{overflow-x:auto;-webkit-overflow-scrolling:touch}
+      table{min-width:500px}
+      .ov{padding:0;align-items:flex-end}
+      .modal{border-radius:20px 20px 0 0;max-height:92vh;max-width:100%!important}
+      .lc{padding:28px 20px;border-radius:16px}
+      .sbar{flex-direction:column}
+      .blg{padding:10px 18px;font-size:14px}
+    }
+    @media(max-width:399px){
+      .sg{grid-template-columns:1fr}
+      .topbar h2{font-size:15px}
+    }
+  `}</style>
+);
+
+// ─── ÍCONES ───────────────────────────────────────────────────────────────────
+const ICONS = {
+  dashboard: <><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></>,
+  users:    <><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></>,
+  package:  <><path d="m12.89 1.45 8 4A2 2 0 0 1 22 7.24v9.53a2 2 0 0 1-1.11 1.79l-8 4a2 2 0 0 1-1.78 0l-8-4a2 2 0 0 1-1.11-1.8V7.24a2 2 0 0 1 1.11-1.79l8-4a2 2 0 0 1 1.78 0z"/><polyline points="2.32 6.16 12 11 21.68 6.16"/><line x1="12" y1="22.76" x2="12" y2="11"/></>,
+  check:    <><polyline points="20 6 9 17 4 12"/></>,
+  plus:     <><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>,
+  search:   <><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></>,
+  edit:     <><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></>,
+  trash:    <><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/><path d="M9 6V4h6v2"/></>,
+  report:   <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></>,
+  log:      <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="13 2 13 9 20 9"/></>,
+  whatsapp: <><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></>,
+  camera:   <><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></>,
+  download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></>,
+  ai:       <><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></>,
+  x:        <><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>,
+  notify:   <><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></>,
+  db:       <><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></>,
+  key:      <><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></>,
+  eye:      <><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>,
+  eyeoff:   <><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></>,
+  gear:     <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></>,
+};
+
+const Icon = ({ n }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{ICONS[n]}</svg>;
+
+// ─── LOGIN ────────────────────────────────────────────────────────────────────
+const Login = ({ onLogin, users }) => {
+  const [login, setL] = useState("");
+  const [senha, setS] = useState("");
+  const [err, setE] = useState("");
+  const go = () => {
+    const l = login.trim();
+    const s = senha.trim();
+    if (!l || !s) { setE("Preencha usuário e senha."); return; }
+    const found = (users || USERS).find(u => u.login === l && u.senha === s);
+    if (found) { onLogin(found); }
+    else { setE("Usuário ou senha incorretos."); }
+  };
+  return (
+    <div className="lp" style={{position:"relative"}}>
+      <div className="lbg"/>
+      <div className="lc">
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div className="li">📦</div>
+          <h1 style={{fontFamily:"var(--fn2)",fontSize:22,fontWeight:700}}>Portaria <span style={{color:"var(--ac)"}}>Express</span></h1>
+          <p style={{fontSize:13,color:"var(--t3)",marginTop:6}}>Sistema inteligente de gestão de encomendas para condomínios.</p>
+        </div>
+        <div className="f"><label>USUÁRIO</label><input className="inp" value={login} onChange={e=>{setL(e.target.value);setE("")}} placeholder="admin" onKeyDown={e=>e.key==="Enter"&&go()}/></div>
+        <div className="f"><label>SENHA</label><input className="inp" type="password" value={senha} onChange={e=>{setS(e.target.value);setE("")}} placeholder="••••••" onKeyDown={e=>e.key==="Enter"&&go()}/></div>
+        {err&&<p style={{color:"var(--rd)",fontSize:13,marginBottom:12,textAlign:"center"}}>{err}</p>}
+        <button className="btn bp blg" style={{width:"100%"}} onClick={go}>Entrar no sistema</button>
+        <p style={{textAlign:"center",fontSize:11,color:"var(--t3)",marginTop:16}}>admin / 123456</p>
+      </div>
+    </div>
+  );
+};
+
+// ─── SIDEBAR ──────────────────────────────────────────────────────────────────
+const Sidebar = ({ page, setPage, user, onLogout }) => {
+  const nav = [{sec:"PRINCIPAL"},{id:"dashboard",l:"Dashboard",i:"dashboard"},{id:"encomendas",l:"Encomendas",i:"package"},{id:"retirada",l:"Retirada",i:"check"},{sec:"GESTÃO"},{id:"moradores",l:"Moradores",i:"users"},{id:"usuarios",l:"Usuários",i:"key"},{id:"notificacoes",l:"Notificações",i:"notify"},{id:"relatorios",l:"Relatórios",i:"report"},{id:"logs",l:"Auditoria",i:"log"},{sec:"SISTEMA"},{id:"configuracoes",l:"Configurações",i:"gear"}];
+  return (
+    <div className="sb">
+      <div className="sb-logo"><h1>📦 Portaria <span>Express</span></h1><p>Gestão de Encomendas</p></div>
+      <nav className="sb-nav">
+        {nav.map((n,i)=>n.sec?<div key={i} className="nsec">{n.sec}</div>:
+          <div key={n.id} className={`ni${page===n.id?" on":""}`} onClick={()=>setPage(n.id)}><Icon n={n.i}/>{n.l}</div>
+        )}
+      </nav>
+      <div className="sb-usr">
+        <div className="sb-usr-row">
+          <div className="av">{user.nome[0]}</div>
+          <div className="av-info"><p>{user.nome.split(" ")[0]}</p><span>{user.perfil}</span></div>
+        </div>
+        <button className="logbtn" onClick={onLogout}>Sair do sistema</button>
+      </div>
+    </div>
+  );
+};
+
+// ─── BANNER ───────────────────────────────────────────────────────────────────
+const Banner = () => DB_OK
+  ? <div className="dbb dbb-ok"><Icon n="db"/><span><strong>Supabase conectado</strong> — dados salvos em tempo real</span></div>
+  : <div className="dbb"><Icon n="db"/><span><strong>Modo demo</strong> — configure SUPABASE_URL e SUPABASE_KEY no código para ativar o banco. Dados não persistem ao recarregar.</span></div>;
+
+// ─── DASHBOARD ────────────────────────────────────────────────────────────────
+const Dashboard = ({ encomendas, moradores }) => {
+  const pend = encomendas.filter(e=>e.status==="pendente");
+  const retir = encomendas.filter(e=>e.status==="retirada");
+  const hj = encomendas.filter(e=>isToday(e.criado_em));
+  const agd = [...pend].sort((a,b)=>new Date(a.criado_em)-new Date(b.criado_em));
+  const ult = [...encomendas].sort((a,b)=>new Date(b.criado_em)-new Date(a.criado_em)).slice(0,10);
+  return (
+    <div>
+      <Banner/>
+      <div className="sg">
+        {[{i:"users",l:"Moradores Ativos",v:moradores.filter(m=>m.ativo).length,c:"#3b82f6",bg:"var(--bld)"},{i:"package",l:"Pendentes",v:pend.length,c:"var(--ac)",bg:"var(--ad)"},{i:"check",l:"Retiradas",v:retir.length,c:"var(--gn)",bg:"var(--gd)"},{i:"camera",l:"Recebidas Hoje",v:hj.length,c:"#a78bfa",bg:"#a78bfa22"}].map((s,i)=>(
+          <div className="sc" key={i}>
+            <div className="sc-icon" style={{background:s.bg,color:s.c}}><Icon n={s.i}/></div>
+            <div><h3>{s.v}</h3><p>{s.l}</p></div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"3fr 2fr",gap:20}}>
+        <div className="card">
+          <div className="ch"><h3>Últimas 10 Encomendas</h3></div>
+          <div className="tw"><table>
+            <thead><tr><th>Protocolo</th><th>Morador</th><th>Status</th><th>Data</th></tr></thead>
+            <tbody>
+              {ult.length===0&&<tr><td colSpan={4}><div className="empty"><Icon n="package"/><p>Nenhuma encomenda</p></div></td></tr>}
+              {ult.map(e=>(
+                <tr key={e.id}>
+                  <td><code style={{fontSize:11,color:"var(--t3)"}}>{e.protocolo}</code></td>
+                  <td><strong>{e.morador}</strong><br/><span style={{fontSize:11,color:"var(--t3)"}}>Bl {e.bloco}/Ap {e.apartamento}</span></td>
+                  <td><span className={`badge ${e.status==="pendente"?"by":"bg"}`}>{e.status==="pendente"?"⏳ Pendente":"✓ Retirada"}</span></td>
+                  <td style={{fontSize:11}}>{fmtShort(e.criado_em)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+        </div>
+        <div className="card">
+          <div className="ch"><h3>Aguardando — por tempo</h3></div>
+          <div className="tw"><table>
+            <thead><tr><th>Morador</th><th>Ap</th><th>Dias</th></tr></thead>
+            <tbody>
+              {agd.length===0&&<tr><td colSpan={3} style={{textAlign:"center",color:"var(--t3)",padding:32}}>Nenhuma pendente 🎉</td></tr>}
+              {agd.map(e=>{ const d=getDias(e.criado_em); return (
+                <tr key={e.id}>
+                  <td><strong>{e.morador}</strong></td>
+                  <td>Bl {e.bloco}/{e.apartamento}</td>
+                  <td><span className={d<=1?"dok":d<=3?"dw":"dd"}>{d}d</span></td>
+                </tr>
+              );})}
+            </tbody>
+          </table></div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── READONLY BANNER ─────────────────────────────────────────────────────────
+const ReadonlyBanner = () => (
+  <div style={{background:"#a78bfa22",border:"1.5px solid #a78bfa44",borderRadius:"var(--rs)",padding:"10px 16px",marginBottom:20,display:"flex",alignItems:"center",gap:10,fontSize:13,color:"#a78bfa"}}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{width:16,height:16,flexShrink:0}}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    <span><strong>Modo visualização</strong> — apenas administradores podem editar esta seção.</span>
+  </div>
+);
+
+// ─── MORADORES ────────────────────────────────────────────────────────────────
+const Moradores = ({ moradores, setMoradores, user }) => {
+  const [srch, setSrch] = useState(""); const [fb, setFb] = useState(""); const [modal, setModal] = useState(null); const [form, setForm] = useState({}); const [delId, setDelId] = useState(null);
+  const readonly = isReadonly(user.perfil, "moradores");
+  const blocos = [...new Set(moradores.map(m=>m.bloco))].sort();
+  const list = moradores.filter(m=>(!srch||m.nome.toLowerCase().includes(srch.toLowerCase())||m.apartamento.includes(srch))&&(!fb||m.bloco===fb));
+  const save = () => {
+    if(!form.nome||!form.apartamento||!form.bloco) return alert("Preencha nome, ap e bloco.");
+    modal==="novo"?setMoradores(p=>[...p,{...form,id:Date.now()}]):setMoradores(p=>p.map(m=>m.id===form.id?form:m));
+    setModal(null);
+  };
+  return (
+    <div>
+      {readonly && <ReadonlyBanner/>}
+      <div style={{display:"flex",justifyContent:"flex-end",gap:10,marginBottom:20}}>
+        <button className="btn bg2 bsm"><Icon n="download"/> Importar CSV</button>
+        {!readonly && <button className="btn bp" onClick={()=>{setForm({nome:"",apartamento:"",bloco:"",telefone:"",whatsapp:"",obs:"",ativo:true});setModal("novo")}}><Icon n="plus"/> Novo Morador</button>}
+      </div>
+      <div className="sbar">
+        <div className="sw"><Icon n="search"/><input className="inp" placeholder="Nome, apartamento..." value={srch} onChange={e=>setSrch(e.target.value)}/></div>
+        <select className="inp" style={{width:160}} value={fb} onChange={e=>setFb(e.target.value)}>
+          <option value="">Todos os blocos</option>{blocos.map(b=><option key={b}>{b}</option>)}
+        </select>
+      </div>
+      <div className="card"><div className="tw"><table>
+        <thead><tr><th>Nome</th><th>Bloco/Ap</th><th>Telefone</th><th>Status</th><th>Ações</th></tr></thead>
+        <tbody>
+          {list.length===0&&<tr><td colSpan={5}><div className="empty"><Icon n="users"/><p>Nenhum morador</p></div></td></tr>}
+          {list.map(m=>(
+            <tr key={m.id}>
+              <td><strong>{m.nome}</strong>{m.obs&&<><br/><span style={{fontSize:11,color:"var(--t3)"}}>{m.obs}</span></>}</td>
+              <td>Bl <strong>{m.bloco}</strong> / Ap <strong>{m.apartamento}</strong></td>
+              <td>{m.telefone||"—"}</td>
+              <td><span className={`badge ${m.ativo?"bg":"br"}`}>{m.ativo?"Ativo":"Inativo"}</span></td>
+              <td>{!readonly && <div style={{display:"flex",gap:6}}>
+                <button className="btn bg2 bsm" onClick={()=>{setForm({...m});setModal("editar")}}><Icon n="edit"/></button>
+                <button className="btn bd bsm" onClick={()=>setDelId(m.id)}><Icon n="trash"/></button>
+              </div>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table></div></div>
+      {(modal==="novo"||modal==="editar")&&(
+        <div className="ov" onClick={()=>setModal(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="mh"><h3>{modal==="novo"?"Novo Morador":"Editar Morador"}</h3><button className="xb" onClick={()=>setModal(null)}><Icon n="x"/></button></div>
+            <div className="mb">
+              <div className="f"><label>NOME *</label><input className="inp" value={form.nome||""} onChange={e=>setForm({...form,nome:e.target.value})} placeholder="Nome completo"/></div>
+              <div className="r3">
+                <div className="f"><label>BLOCO *</label><input className="inp" value={form.bloco||""} onChange={e=>setForm({...form,bloco:e.target.value})} placeholder="A"/></div>
+                <div className="f"><label>APARTAMENTO *</label><input className="inp" value={form.apartamento||""} onChange={e=>setForm({...form,apartamento:e.target.value})} placeholder="101"/></div>
+                <div className="f"><label>STATUS</label>
+                  <select className="inp" value={form.ativo?"ativo":"inativo"} onChange={e=>setForm({...form,ativo:e.target.value==="ativo"})}>
+                    <option value="ativo">Ativo</option><option value="inativo">Inativo</option>
+                  </select>
+                </div>
+              </div>
+              <div className="r2">
+                <div className="f"><label>TELEFONE</label><input className="inp" value={form.telefone||""} onChange={e=>setForm({...form,telefone:e.target.value})}/></div>
+                <div className="f"><label>WHATSAPP</label><input className="inp" value={form.whatsapp||""} onChange={e=>setForm({...form,whatsapp:e.target.value})}/></div>
+              </div>
+              <div className="f"><label>OBSERVAÇÕES</label><textarea className="inp" value={form.obs||""} onChange={e=>setForm({...form,obs:e.target.value})}/></div>
+            </div>
+            <div className="mf"><button className="btn bg2" onClick={()=>setModal(null)}>Cancelar</button><button className="btn bp" onClick={save}>Salvar</button></div>
+          </div>
+        </div>
+      )}
+      {delId&&(
+        <div className="ov" onClick={()=>setDelId(null)}>
+          <div className="modal" style={{maxWidth:340}} onClick={e=>e.stopPropagation()}>
+            <div className="mb" style={{textAlign:"center",padding:32}}>
+              <div style={{fontSize:36,marginBottom:16}}>🗑️</div>
+              <h3 style={{marginBottom:8}}>Excluir morador?</h3>
+              <p style={{color:"var(--t3)",fontSize:13,marginBottom:24}}>Esta ação não pode ser desfeita.</p>
+              <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+                <button className="btn bg2" onClick={()=>setDelId(null)}>Cancelar</button>
+                <button className="btn bd" onClick={()=>{setMoradores(p=>p.filter(m=>m.id!==delId));setDelId(null);}}>Excluir</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── FOTO CAPTURE (câmera via getUserMedia — funciona em qualquer browser) ────
+const FotoCapture = ({ img, setImg, onOCR, loading }) => {
+  const [mode, setMode] = useState("idle"); // idle | solicitando | camera | preview | bloqueado
+  const [flash, setFlash] = useState(false);
+  const [errDetalhe, setErrDetalhe] = useState("");
+  const videoRef = useRef();
+  const canvasRef = useRef();
+  const streamRef = useRef();
+
+  const startCam = async () => {
+    setMode("solicitando");
+    setErrDetalhe("");
+    try {
+      // Verifica suporte
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setErrDetalhe("Seu navegador não suporta câmera. Use o Chrome.");
+        setMode("bloqueado"); return;
+      }
+      // Tenta câmera traseira primeiro, depois qualquer câmera
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: {exact:"environment"} }
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      }
+      streamRef.current = stream;
+      setMode("camera");
+      // Pequeno delay para o DOM renderizar o video element
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if(videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.play().catch(()=>{});
+          }
+        });
+      });
+    } catch(e) {
+      const nome = e.name || "";
+      if(nome === "NotAllowedError" || nome === "PermissionDeniedError") {
+        setErrDetalhe("PERMISSÃO NEGADA");
+      } else if(nome === "NotFoundError") {
+        setErrDetalhe("Nenhuma câmera encontrada no dispositivo.");
+      } else if(nome === "NotReadableError") {
+        setErrDetalhe("Câmera em uso por outro aplicativo. Feche e tente novamente.");
+      } else {
+        setErrDetalhe("Erro: " + (e.message || nome));
+      }
+      setMode("bloqueado");
+    }
+  };
+
+  const stopCam = () => {
+    if(streamRef.current) { streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
+    setMode("idle");
+  };
+
+  const capturar = () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if(!video||!canvas) return;
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    setFlash(true);
+    setTimeout(()=>setFlash(false), 200);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    setImg(dataUrl);
+    stopCam();
+    setMode("preview");
+  };
+
+  useEffect(()=>()=>stopCam(),[]);
+
+  // Foto capturada — mostrar preview
+  if(img && mode==="preview") return (
+    <div>
+      <img src={img} style={{width:"100%",maxHeight:220,objectFit:"contain",borderRadius:"var(--rs)",background:"#00000033",marginBottom:12}} alt="etiqueta"/>
+      <div style={{display:"flex",gap:10}}>
+        <button className="btn bs" style={{flex:1}} onClick={()=>{setImg(null);setMode("idle");}}>↩ Nova foto</button>
+        <button className="btn bp" style={{flex:1}} onClick={onOCR} disabled={loading}>
+          {loading?<><span className="spin"/> Lendo...</>:<><Icon n="ai"/> Ler com IA</>}
+        </button>
+      </div>
+    </div>
+  );
+
+  // Aguardando permissão
+  if(mode==="solicitando") return (
+    <div style={{textAlign:"center",padding:"32px 16px"}}>
+      <div style={{fontSize:48,marginBottom:16}}>📷</div>
+      <p style={{color:"var(--ac)",fontWeight:700,fontSize:15,marginBottom:8}}>Solicitando permissão...</p>
+      <p style={{color:"var(--t2)",fontSize:13}}>Quando o navegador perguntar, toque em <strong>"Permitir"</strong></p>
+    </div>
+  );
+
+  // Câmera ativa
+  if(mode==="camera") return (
+    <div>
+      <div style={{position:"relative",borderRadius:"var(--rs)",overflow:"hidden",background:"#000",marginBottom:10}}>
+        <video ref={videoRef} style={{width:"100%",maxHeight:280,objectFit:"cover",display:"block"}} playsInline muted autoPlay/>
+        <canvas ref={canvasRef} style={{display:"none"}}/>
+        {flash && <div style={{position:"absolute",inset:0,background:"#fff",opacity:0.7}}/>}
+        <div style={{position:"absolute",inset:0,pointerEvents:"none"}}>
+          <div style={{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",
+            width:"80%",height:"60%",border:"2px solid var(--ac)",borderRadius:8,
+            boxShadow:"0 0 0 9999px #00000055"}}>
+            <div style={{position:"absolute",top:0,left:0,width:20,height:20,borderTop:"3px solid var(--ac)",borderLeft:"3px solid var(--ac)"}}/>
+            <div style={{position:"absolute",top:0,right:0,width:20,height:20,borderTop:"3px solid var(--ac)",borderRight:"3px solid var(--ac)"}}/>
+            <div style={{position:"absolute",bottom:0,left:0,width:20,height:20,borderBottom:"3px solid var(--ac)",borderLeft:"3px solid var(--ac)"}}/>
+            <div style={{position:"absolute",bottom:0,right:0,width:20,height:20,borderBottom:"3px solid var(--ac)",borderRight:"3px solid var(--ac)"}}/>
+          </div>
+        </div>
+      </div>
+      <p style={{textAlign:"center",fontSize:12,color:"var(--t3)",marginBottom:10}}>Encaixe a etiqueta na área marcada</p>
+      <div style={{display:"flex",gap:10}}>
+        <button className="btn bd" style={{flex:1}} onClick={stopCam}>✕ Cancelar</button>
+        <button className="btn bp blg" style={{flex:2,justifyContent:"center"}} onClick={capturar}>📸 Capturar</button>
+      </div>
+    </div>
+  );
+
+  // Câmera bloqueada — instruções detalhadas + alternativas
+  if(mode==="bloqueado") return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {errDetalhe==="PERMISSÃO NEGADA" ? (
+        <div style={{background:"var(--rdd)",border:"1px solid #ef444433",borderRadius:"var(--r)",padding:16}}>
+          <p style={{fontWeight:700,color:"var(--rd)",fontSize:14,marginBottom:12}}>🚫 Permissão negada</p>
+          <p style={{fontSize:13,color:"var(--t2)",marginBottom:10}}>Para liberar a câmera no Chrome:</p>
+          <div style={{background:"var(--s2)",borderRadius:"var(--rs)",padding:12,display:"flex",flexDirection:"column",gap:6}}>
+            <p style={{fontSize:12,color:"var(--t2)"}}>1️⃣ Toque no ícone 🔒 na barra de endereços</p>
+            <p style={{fontSize:12,color:"var(--t2)"}}>2️⃣ Toque em <strong>"Permissões"</strong></p>
+            <p style={{fontSize:12,color:"var(--t2)"}}>3️⃣ Ative <strong>"Câmera"</strong> → Permitir</p>
+            <p style={{fontSize:12,color:"var(--t2)"}}>4️⃣ Recarregue a página</p>
+          </div>
+        </div>
+      ) : (
+        <div style={{background:"#f59e0b15",border:"1.5px solid #f59e0b44",borderRadius:"var(--r)",padding:16,textAlign:"center"}}>
+          <div style={{fontSize:36,marginBottom:8}}>📷</div>
+          <p style={{fontWeight:700,color:"var(--ac)",fontSize:14,marginBottom:4}}>Câmera não disponível</p>
+          <p style={{fontSize:12,color:"var(--t2)"}}>{errDetalhe}</p>
+        </div>
+      )}
+      <button className="btn bp blg" style={{width:"100%",justifyContent:"center"}} onClick={startCam}>
+        🔄 Tentar Novamente
+      </button>
+      {/* Alternativa: upload de arquivo */}
+      <div style={{borderTop:"1px solid var(--b1)",paddingTop:12}}>
+        <p style={{fontSize:12,color:"var(--t3)",textAlign:"center",marginBottom:10}}>Ou envie uma foto da galeria:</p>
+        <label style={{display:"block",cursor:"pointer"}}>
+          <div className="uz" style={{padding:16}}>
+            <Icon n="download"/>
+            <p>Clique para escolher uma foto da galeria</p>
+          </div>
+          <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{
+            if(e.target.files[0]){
+              const r=new FileReader();
+              r.onload=ev=>{ setImg(ev.target.result); setMode("preview"); };
+              r.readAsDataURL(e.target.files[0]);
+            }
+          }}/>
+        </label>
+      </div>
+    </div>
+  );
+
+  // Estado inicial
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12,alignItems:"center",padding:"8px 0"}}>
+      <canvas ref={canvasRef} style={{display:"none"}}/>
+      <div style={{fontSize:56,marginBottom:4}}>📷</div>
+      <p style={{color:"var(--t1)",fontWeight:600,fontSize:15}}>Fotografar Etiqueta</p>
+      <p style={{textAlign:"center",fontSize:13,color:"var(--t2)",lineHeight:1.6}}>
+        Ao clicar, o navegador vai <strong>pedir permissão</strong> para usar a câmera.<br/>
+        Toque em <strong style={{color:"var(--ac)"}}>Permitir</strong> para continuar.
+      </p>
+      <button className="btn bp blg" style={{width:"100%",justifyContent:"center",marginTop:4}} onClick={startCam}>
+        📷 Ativar Câmera
+      </button>
+    </div>
+  );
+};
+
+// ─── NOVA ENCOMENDA ───────────────────────────────────────────────────────────
+const NovaModal = ({ moradores, onSave, onClose, user }) => {
+  const [step, setStep] = useState(1);
+  const [inputMode, setInputMode] = useState("manual"); // foto | scanner | manual
+  const [img, setImg] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [ocr, setOcr] = useState(null);
+  const [sugs, setSugs] = useState([]);
+  const [form, setForm] = useState({morador:"",apartamento:"",bloco:"",telefone:"",transportadora:"",rastreio:"",remetente:""});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState(null);
+  const [scanError, setScanError] = useState("");
+  const fRef = useRef();
+  const videoRef = useRef();
+  const canvasRef = useRef();
+  const streamRef = useRef();
+  const animRef = useRef();
+
+  const readImg = f => { const r=new FileReader(); r.onload=e=>setImg(e.target.result); r.readAsDataURL(f); };
+
+  // Start camera for barcode scanning
+  const startScanner = async () => {
+    setScanError(""); setScanResult(null); setScanning(true);
+    try {
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setScanError("SEM_CAMERA"); setScanning(false); return;
+      }
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width:{ideal:1280}, height:{ideal:720} }
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      }
+      streamRef.current = stream;
+      requestAnimationFrame(()=>requestAnimationFrame(()=>{
+        if(videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(()=>{});
+          scanFrame();
+        }
+      }));
+    } catch(e) {
+      const nome = e.name || "";
+      if(nome === "NotAllowedError" || nome === "PermissionDeniedError") {
+        setScanError("PERMISSAO_NEGADA");
+      } else {
+        setScanError("SEM_CAMERA");
+      }
+      setScanning(false);
+    }
+  };
+
+  const stopScanner = () => {
+    if(streamRef.current) { streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
+    if(animRef.current) { cancelAnimationFrame(animRef.current); animRef.current=null; }
+    setScanning(false);
+  };
+
+  const scanFrame = () => {
+    if(!videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    if(video.readyState !== video.HAVE_ENOUGH_DATA) { animRef.current=requestAnimationFrame(scanFrame); return; }
+    const canvas = canvasRef.current;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    try {
+      // Try BarcodeDetector API (Chrome/Android)
+      if("BarcodeDetector" in window) {
+        const detector = new window.BarcodeDetector({ formats: ["code_128","code_39","ean_13","ean_8","qr_code","data_matrix","pdf417"] });
+        detector.detect(canvas).then(codes => {
+          if(codes.length > 0) {
+            const code = codes[0].rawValue;
+            setScanResult(code);
+            setForm(f=>({...f, rastreio: code}));
+            stopScanner();
+            return;
+          }
+          animRef.current = requestAnimationFrame(scanFrame);
+        }).catch(()=>{ animRef.current = requestAnimationFrame(scanFrame); });
+      } else {
+        // Fallback: read frame as image and send to Claude OCR
+        animRef.current = requestAnimationFrame(scanFrame);
+      }
+    } catch { animRef.current = requestAnimationFrame(scanFrame); }
+  };
+
+  const scanManualConfirm = () => {
+    if(!form.rastreio) return alert("Digite o código de barras.");
+    setScanResult(form.rastreio);
+    setStep(2);
+  };
+
+  useEffect(() => { return () => stopScanner(); }, []);
+
+  const switchMode = (mode) => { stopScanner(); setInputMode(mode); setScanResult(null); setScanError(""); if(mode!=="infra") setForm(f=>({...f,rastreio:""})); };
+
+  // Comprime imagem para reduzir tokens/quota
+  const compressImg = (dataUrl, maxW=1024, quality=0.82) => new Promise(resolve => {
+    const canvas = document.createElement("canvas");
+    const image = new Image();
+    image.onload = () => {
+      let w = image.width, h = image.height;
+      if(w > maxW) { h = Math.round(h * maxW / w); w = maxW; }
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(image, 0, 0, w, h);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    image.src = dataUrl;
+  });
+
+  const callGemini = async (apiKey, b64, mime, prompt, model) => {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      { method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          contents:[{parts:[
+            {inline_data:{mime_type:mime, data:b64}},
+            {text:prompt}
+          ]}],
+          generationConfig:{maxOutputTokens:800, temperature:0}
+        })
+      }
+    );
+    const data = await res.json();
+    if(!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  };
+
+  const runOCR = async () => {
+    if(!img) return alert("Tire ou envie uma foto da etiqueta antes de ler com IA.");
+
+    const apiKey = getAnthropicKey();
+    const provider = getIAProvider(apiKey);
+
+    if(!apiKey || !provider) {
+      alert("⚙️ API Key não configurada.\n\nVá em ⚙️ Configurações e cole sua key.\n\n• Gemini (AIza...) — gratuito: aistudio.google.com/apikey\n• Anthropic (sk-ant-...)\n• DeepSeek não suporta imagens");
+      setStep(2); return;
+    }
+
+    if(provider === "deepseek") {
+      alert("⚠️ DeepSeek não suporta leitura de imagens.\n\nUse o Gemini (gratuito):\n1. Acesse aistudio.google.com/apikey\n2. Crie uma key (AIza...)\n3. Cole em ⚙️ Configurações");
+      setStep(2); return;
+    }
+
+    setLoading(true);
+    try {
+      // Comprime imagem antes de enviar (reduz quota consumida)
+      const compressed = await compressImg(img);
+      const mediaType = "image/jpeg";
+      const base64Data = compressed.split(",")[1];
+
+      const prompt = `Analise esta etiqueta de encomenda brasileira e extraia os dados do DESTINATÁRIO.
+Retorne SOMENTE este JSON sem markdown nem texto extra:
+{"nome":"","apartamento":"","bloco":"","telefone":"","rastreio":"","transportadora":"","remetente":""}
+Campos: nome do destinatário, apartamento, bloco, telefone, código de rastreio (ex: BR123456789BR), transportadora (Correios/Jadlog/Loggi/Shopee/etc), remetente (Amazon/Shein/etc).
+Se não visível deixe "". NÃO invente.`;
+
+      let txt = "";
+
+      if(provider === "anthropic") {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method:"POST",
+          headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+          body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:800,messages:[{role:"user",content:[
+            {type:"image",source:{type:"base64",media_type:mediaType,data:base64Data}},
+            {type:"text",text:prompt}
+          ]}]})
+        });
+        if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e?.error?.message||`HTTP ${res.status}`);}
+        const data = await res.json();
+        txt = data.content?.map(c=>c.text||"").join("").trim();
+
+      } else if(provider === "gemini") {
+        // Modelos em ordem: mais novo → fallback para mais antigo
+        // Todos confirmados como disponíveis na API v1beta em março/2026
+        const modelos = [
+          "gemini-2.5-flash",
+          "gemini-2.0-flash",
+          "gemini-1.5-flash",
+          "gemini-1.5-pro",
+        ];
+        let lastErr = null;
+        let tentou = [];
+        for(const modelo of modelos) {
+          try {
+            txt = await callGemini(apiKey, base64Data, mediaType, prompt, modelo);
+            if(txt) { console.log("OCR ok com modelo:", modelo); break; }
+          } catch(e) {
+            lastErr = e;
+            const msg = e.message || "";
+            tentou.push(modelo);
+            // Se quota esgotada ou modelo não disponível, tenta próximo
+            if(msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||msg.includes("429")||msg.includes("not found")||msg.includes("404")) continue;
+            // Erro de key inválida — lança imediatamente
+            throw e;
+          }
+        }
+        if(!txt && lastErr) throw lastErr;
+      }
+
+      const clean = txt.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
+
+      // Parser robusto: tenta JSON completo, depois tenta reparar truncado
+      let p = {};
+      try {
+        const jsonMatch = clean.match(/\{[\s\S]*\}/);
+        if(jsonMatch) p = JSON.parse(jsonMatch[0]);
+        else throw new Error("sem JSON");
+      } catch {
+        // JSON truncado — extrai campos individualmente com regex
+        const extract = (key) => {
+          const m = clean.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)`));
+          return m ? m[1].replace(/\\n/g," ").trim() : "";
+        };
+        p = {
+          nome: extract("nome"),
+          apartamento: extract("apartamento"),
+          bloco: extract("bloco"),
+          telefone: extract("telefone"),
+          rastreio: extract("rastreio"),
+          transportadora: extract("transportadora"),
+          remetente: extract("remetente"),
+        };
+        if(!p.nome) throw new Error("Não foi possível extrair dados da etiqueta. Resposta: " + clean.slice(0,120));
+      }
+
+      setOcr(p);
+      setForm(f=>({...f,...p,morador:p.nome||f.morador}));
+      const sg = moradores.filter(m=>m.ativo).map(m=>{
+        let sc=0;
+        if(p.nome) sc+=simil(p.nome,m.nome)*60;
+        if(p.apartamento&&m.apartamento===p.apartamento) sc+=25;
+        if(p.bloco&&m.bloco===p.bloco) sc+=10;
+        return {...m,score:Math.round(sc)};
+      }).filter(m=>m.score>10).sort((a,b)=>b.score-a.score).slice(0,3);
+      setSugs(sg);
+      setStep(2);
+
+    } catch(err) {
+      console.error("OCR error:", err);
+      const msg = err.message || "";
+      if(msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||msg.includes("429")) {
+        alert("⚠️ Cota da API esgotada.\n\nO Gemini gratuito tem limite de requisições por minuto.\n\nAguarde 1 minuto e tente novamente.\n\nOu crie uma nova key em aistudio.google.com/apikey");
+      } else if(msg.includes("API_KEY_INVALID")||msg.includes("401")||msg.includes("403")) {
+        alert("❌ API Key inválida.\nVerifique em ⚙️ Configurações.");
+      } else if(msg.includes("Failed to fetch")||msg.includes("CORS")||msg.includes("NetworkError")) {
+        alert("❌ Bloqueio de rede.\n\nO arquivo está aberto como arquivo:// local.\n\nSolução: abra um terminal na pasta do arquivo e rode:\n  python -m http.server 8080\n\nDepois acesse: http://localhost:8080/portaria-express-4.html");
+      } else {
+        alert("❌ Erro ao ler etiqueta: " + msg + "\n\nPreencha os dados manualmente.");
+      }
+      setStep(2);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if(!form.morador) return alert("Informe o morador.");
+    setSaving(true);
+    const enc = {protocolo:makeProto(),morador:form.morador,apartamento:form.apartamento,bloco:form.bloco,telefone:form.telefone,transportadora:form.transportadora,rastreio:form.rastreio,remetente:form.remetente,status:"pendente",criado_por:user.nome,criado_em:new Date().toISOString(),retirado_em:null,retirado_por:null};
+    if(DB_OK) { const r=await db.insert("encomendas",enc); if(r) enc.id=r.id; } else enc.id="local_"+Date.now();
+    onSave(enc); setSaved(enc); setSaving(false); setStep(3);
+  };
+
+  const waMsg = saved?encodeURIComponent(`Olá, ${saved.morador}. Sua encomenda foi recebida na portaria do condomínio. Protocolo: ${saved.protocolo}.`):"";
+  const waPhone = saved?.telefone?.replace(/\D/g,"");
+
+  return (
+    <div className="ov" onClick={onClose}>
+      <div className="modal mw" onClick={e=>e.stopPropagation()}>
+        <div className="mh"><h3>📦 Nova Encomenda{step===3?" — Notificação":""}</h3><button className="xb" onClick={onClose}><Icon n="x"/></button></div>
+        <div className="mb">
+          {step===1&&(
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:14}}>
+                <div className={`scan-tab${inputMode==="manual"?" on":""}`} onClick={()=>switchMode("manual")}>⌨️ Manual</div>
+                <div className={`scan-tab${inputMode==="infra"?" on":""}`} onClick={()=>switchMode("infra")}>🔴 Infravermelho</div>
+                <div className={`scan-tab${inputMode==="scanner"?" on":""}`} onClick={()=>switchMode("scanner")}>📡 Scanner Câmera</div>
+                <div className={`scan-tab${inputMode==="foto"?" on":""}`} onClick={()=>switchMode("foto")}>📷 Câmera IA</div>
+              </div>
+
+              {inputMode==="foto"&&(
+                <FotoCapture img={img} setImg={setImg} onOCR={runOCR} loading={loading}/>
+              )}
+
+              {inputMode==="infra"&&(
+                <>
+                  <div style={{textAlign:"center",padding:"12px 0 8px"}}>
+                    <div style={{fontSize:40,marginBottom:10}}>🔴</div>
+                    <p style={{color:"var(--t1)",fontSize:14,fontWeight:600,marginBottom:6}}>Scanner de Infravermelho / USB / Bluetooth</p>
+                    <p style={{color:"var(--t2)",fontSize:12,marginBottom:16}}>Clique no campo abaixo e aponte o scanner para o código de barras da etiqueta. O código será lido automaticamente.</p>
+                  </div>
+                  <div className="f">
+                    <label>AGUARDANDO LEITURA DO SCANNER...</label>
+                    <input
+                      className="inp"
+                      value={form.rastreio||""}
+                      onChange={e=>setForm({...form,rastreio:e.target.value})}
+                      onKeyDown={e=>{
+                        if(e.key==="Enter"&&form.rastreio){
+                          setScanResult(form.rastreio);
+                          setStep(2);
+                        }
+                      }}
+                      placeholder="🔴 Aponte o scanner aqui..."
+                      autoFocus
+                      style={{fontSize:15,letterSpacing:1,textAlign:"center",borderColor:"var(--ac)",background:"var(--ad)"}}
+                    />
+                    <p style={{fontSize:11,color:"var(--t3)",marginTop:6,textAlign:"center"}}>O scanner vai preencher e pressionar Enter automaticamente</p>
+                  </div>
+                  {form.rastreio&&(
+                    <div style={{background:"var(--gd)",border:"1px solid #10b98133",borderRadius:"var(--rs)",padding:"10px 14px",marginBottom:12,display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:18}}>✅</span>
+                      <div>
+                        <p style={{fontSize:12,color:"var(--gn)",fontWeight:600}}>Código lido!</p>
+                        <code style={{fontSize:13,color:"var(--t1)"}}>{form.rastreio}</code>
+                      </div>
+                    </div>
+                  )}
+                  <div style={{display:"flex",gap:10}}>
+                    <button className="btn bs" style={{flex:1}} onClick={()=>setForm({...form,rastreio:""})}>🗑️ Limpar</button>
+                    <button className="btn bp" style={{flex:2}} onClick={()=>{if(!form.rastreio)return alert("Aponte o scanner para o código.");setScanResult(form.rastreio);setStep(2);}}>
+                      Continuar →
+                    </button>
+                  </div>
+                  <div style={{marginTop:16,background:"var(--s2)",border:"1px solid var(--b1)",borderRadius:"var(--rs)",padding:12}}>
+                    <p style={{fontSize:11,color:"var(--t3)",fontWeight:600,marginBottom:6}}>💡 COMO USAR</p>
+                    <p style={{fontSize:12,color:"var(--t2)"}}>1. Conecte o scanner via USB ou Bluetooth</p>
+                    <p style={{fontSize:12,color:"var(--t2)"}}>2. Clique no campo acima para focar</p>
+                    <p style={{fontSize:12,color:"var(--t2)"}}>3. Aponte o scanner para o código de barras</p>
+                    <p style={{fontSize:12,color:"var(--t2)"}}>4. O scanner lê e avança automaticamente</p>
+                  </div>
+                </>
+              )}
+
+              {inputMode==="scanner"&&(
+                <>
+                  {/* ── ERRO: Permissão negada ── */}
+                  {scanError==="PERMISSAO_NEGADA" && (
+                    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                      <div style={{background:"var(--rdd)",border:"1px solid #ef444433",borderRadius:"var(--r)",padding:16}}>
+                        <p style={{fontWeight:700,color:"var(--rd)",fontSize:14,marginBottom:10}}>🚫 Permissão de câmera negada</p>
+                        <div style={{background:"var(--s2)",borderRadius:"var(--rs)",padding:12,display:"flex",flexDirection:"column",gap:5}}>
+                          <p style={{fontSize:12,color:"var(--t2)"}}>1️⃣ Clique no ícone 🔒 na barra de endereços</p>
+                          <p style={{fontSize:12,color:"var(--t2)"}}>2️⃣ Vá em <strong>"Permissões do site"</strong></p>
+                          <p style={{fontSize:12,color:"var(--t2)"}}>3️⃣ Ative <strong>"Câmera"</strong> → Permitir</p>
+                          <p style={{fontSize:12,color:"var(--t2)"}}>4️⃣ Recarregue a página e tente novamente</p>
+                        </div>
+                      </div>
+                      <p style={{fontSize:12,color:"var(--t3)",textAlign:"center"}}>Ou use uma alternativa abaixo 👇</p>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                        <button className="btn bs" style={{justifyContent:"center",flexDirection:"column",padding:"14px 12px",gap:6,height:"auto"}}
+                          onClick={()=>{setScanError("");setInputMode("leitor");}}>
+                          <span style={{fontSize:22}}>🔌</span>
+                          <span style={{fontSize:12}}>Scanner USB/BT</span>
+                        </button>
+                        <button className="btn bs" style={{justifyContent:"center",flexDirection:"column",padding:"14px 12px",gap:6,height:"auto"}}
+                          onClick={()=>{setScanError("");setInputMode("manual");}}>
+                          <span style={{fontSize:22}}>⌨️</span>
+                          <span style={{fontSize:12}}>Digitar código</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── ERRO: Sem câmera / não suportado ── */}
+                  {scanError==="SEM_CAMERA" && (
+                    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                      <div style={{background:"#f59e0b15",border:"1.5px solid #f59e0b44",borderRadius:"var(--r)",padding:16,textAlign:"center"}}>
+                        <div style={{fontSize:40,marginBottom:10}}>📷</div>
+                        <p style={{fontWeight:700,color:"var(--ac)",fontSize:14,marginBottom:6}}>Câmera não disponível</p>
+                        <p style={{fontSize:13,color:"var(--t2)"}}>Este dispositivo não tem câmera ou ela não foi reconhecida.</p>
+                      </div>
+                      <p style={{fontSize:12,color:"var(--t3)",textAlign:"center",fontWeight:600}}>Escolha uma alternativa:</p>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                        <button className="btn bs" style={{justifyContent:"center",flexDirection:"column",padding:"16px 12px",gap:8,height:"auto",border:"1.5px solid var(--b2)"}}
+                          onClick={()=>{setScanError("");setInputMode("leitor");}}>
+                          <span style={{fontSize:26}}>🔌</span>
+                          <span style={{fontSize:13,fontWeight:700,color:"var(--t1)"}}>Scanner USB/BT</span>
+                          <span style={{fontSize:11,color:"var(--t3)",textAlign:"center"}}>Conecte um leitor físico</span>
+                        </button>
+                        <button className="btn bs" style={{justifyContent:"center",flexDirection:"column",padding:"16px 12px",gap:8,height:"auto",border:"1.5px solid var(--b2)"}}
+                          onClick={()=>{setScanError("");setInputMode("manual");}}>
+                          <span style={{fontSize:26}}>⌨️</span>
+                          <span style={{fontSize:13,fontWeight:700,color:"var(--t1)"}}>Digitar manualmente</span>
+                          <span style={{fontSize:11,color:"var(--t3)",textAlign:"center"}}>Informe o código de rastreio</span>
+                        </button>
+                      </div>
+                      <button className="btn bg2" style={{width:"100%",justifyContent:"center"}} onClick={()=>{setScanError("");startScanner();}}>
+                        🔄 Tentar câmera novamente
+                      </button>
+                    </div>
+                  )}
+
+                  {/* ── Estado normal: pronto para escanear ── */}
+                  {!scanError && !scanning && !scanResult && (
+                    <div style={{textAlign:"center",padding:"24px 0"}}>
+                      <div style={{fontSize:40,marginBottom:12}}>📡</div>
+                      <p style={{color:"var(--t2)",fontSize:13,marginBottom:16}}>Aponte a câmera para o código de barras ou QR code da etiqueta</p>
+                      <button className="btn bp blg" onClick={startScanner}><Icon n="camera"/> Ativar Scanner</button>
+                    </div>
+                  )}
+
+                  {/* ── Câmera ativa ── */}
+                  {!scanError && scanResult && <div className="scan-result">✅ Código lido: <strong>{scanResult}</strong></div>}
+                  {!scanError && scanning&&(
+                    <div className="scan-wrap">
+                      <video ref={videoRef} className="scan-video" playsInline muted/>
+                      <canvas ref={canvasRef} style={{display:"none"}}/>
+                      <div className="scan-overlay">
+                        <div className="scan-frame">
+                          <div className="scan-line"/>
+                          <div className="scan-corner tl"/><div className="scan-corner tr"/>
+                          <div className="scan-corner bl"/><div className="scan-corner br"/>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {!scanError && scanning&&<button className="btn bd" style={{width:"100%",marginBottom:10,justifyContent:"center"}} onClick={stopScanner}>✕ Parar Scanner</button>}
+                  {!scanError && scanResult&&(
+                    <div style={{display:"flex",gap:10,marginTop:4}}>
+                      <button className="btn bs" style={{flex:1}} onClick={()=>{setScanResult(null);startScanner();}}>Escanear novamente</button>
+                      <button className="btn bp" style={{flex:1}} onClick={()=>setStep(2)}>Continuar →</button>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {inputMode==="manual"&&(
+                <>
+                  <div className="f"><label>MORADOR *</label>
+                    <input className="inp" value={form.morador||""} onChange={e=>setForm({...form,morador:e.target.value})} placeholder="Nome completo do morador"/>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                    <div className="f"><label>BLOCO</label>
+                      <input className="inp" value={form.bloco||""} onChange={e=>setForm({...form,bloco:e.target.value})} placeholder="A"/>
+                    </div>
+                    <div className="f"><label>APARTAMENTO</label>
+                      <input className="inp" value={form.apartamento||""} onChange={e=>setForm({...form,apartamento:e.target.value})} placeholder="101"/>
+                    </div>
+                  </div>
+                  <div className="f"><label>TELEFONE / WHATSAPP</label>
+                    <input className="inp" value={form.telefone||""} onChange={e=>setForm({...form,telefone:e.target.value})} placeholder="11999990000"/>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                    <div className="f"><label>TRANSPORTADORA</label>
+                      <select className="inp" value={form.transportadora||""} onChange={e=>setForm({...form,transportadora:e.target.value})}>
+                        <option value="">Selecione...</option>
+                        <option>Correios</option>
+                        <option>Jadlog</option>
+                        <option>Loggi</option>
+                        <option>Total Express</option>
+                        <option>Mercado Envios</option>
+                        <option>Shopee Express</option>
+                        <option>Amazon</option>
+                        <option>Shein</option>
+                        <option>Sequoia</option>
+                        <option>Azul Cargo</option>
+                        <option value="outro">Outra</option>
+                      </select>
+                    </div>
+                    <div className="f"><label>REMETENTE</label>
+                      <input className="inp" value={form.remetente||""} onChange={e=>setForm({...form,remetente:e.target.value})} placeholder="Amazon, Shein..."/>
+                    </div>
+                  </div>
+                  <div className="f"><label>CÓDIGO DE RASTREIO</label>
+                    <input className="inp" value={form.rastreio||""} onChange={e=>setForm({...form,rastreio:e.target.value})} placeholder="BR123456789BR"/>
+                  </div>
+                  <button className="btn bp blg" style={{width:"100%",justifyContent:"center"}}
+                    onClick={()=>{if(!form.morador)return alert("Informe o nome do morador.");setStep(2);}}>
+                    Revisar e Salvar →
+                  </button>
+                </>
+              )}
+            </>
+          )}
+          {step===2&&(
+            <>
+              {ocr&&(
+                <div className="ocr">
+                  <p style={{fontSize:11,color:"var(--t3)",marginBottom:8,fontWeight:600}}>✓ DADOS EXTRAÍDOS PELA IA — confirme ou corrija:</p>
+                  {Object.entries(ocr).filter(([,v])=>v).map(([k,v])=>(
+                    <div className="ocr-row" key={k}><span className="ocr-lbl">{k}</span><span className="ocr-val">{v}</span></div>
+                  ))}
+                </div>
+              )}
+              {sugs.length>0&&(
+                <div className="aib">
+                  <div className="aih"><Icon n="ai"/><span className="ait">IA · SUGESTÃO</span></div>
+                  <p style={{fontSize:12,color:"var(--t3)",marginBottom:10}}>Moradores mais prováveis — clique para selecionar:</p>
+                  {sugs.map(m=>(
+                    <div key={m.id} className="ais" onClick={()=>setForm(f=>({...f,morador:m.nome,apartamento:m.apartamento,bloco:m.bloco,telefone:m.telefone}))}>
+                      <div><strong>{m.nome}</strong><br/><span>Bl {m.bloco}/Ap {m.apartamento} · {m.telefone}</span></div>
+                      <span className="aisc">{m.score}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="f"><label>MORADOR *</label><input className="inp" value={form.morador||""} onChange={e=>setForm({...form,morador:e.target.value})} placeholder="Nome do morador"/></div>
+              <div className="r3">
+                <div className="f"><label>BLOCO</label><input className="inp" value={form.bloco||""} onChange={e=>setForm({...form,bloco:e.target.value})} placeholder="A"/></div>
+                <div className="f"><label>APARTAMENTO</label><input className="inp" value={form.apartamento||""} onChange={e=>setForm({...form,apartamento:e.target.value})} placeholder="101"/></div>
+                <div className="f"><label>TELEFONE</label><input className="inp" value={form.telefone||""} onChange={e=>setForm({...form,telefone:e.target.value})} placeholder="11999990000"/></div>
+              </div>
+              <div className="r2">
+                <div className="f"><label>TRANSPORTADORA</label><input className="inp" value={form.transportadora||""} onChange={e=>setForm({...form,transportadora:e.target.value})} placeholder="Correios"/></div>
+                <div className="f"><label>RASTREIO</label><input className="inp" value={form.rastreio||""} onChange={e=>setForm({...form,rastreio:e.target.value})} placeholder="BR000000000BR"/></div>
+              </div>
+              <div className="f"><label>REMETENTE</label><input className="inp" value={form.remetente||""} onChange={e=>setForm({...form,remetente:e.target.value})} placeholder="Amazon, Shopee..."/></div>
+            </>
+          )}
+          {step===3&&saved&&(
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:48,marginBottom:16}}>✅</div>
+              <h3 style={{color:"var(--gn)",marginBottom:8}}>Encomenda registrada{DB_OK?" no banco":""}!</h3>
+              <div style={{background:"var(--s2)",border:"1px solid var(--b1)",borderRadius:"var(--rs)",padding:16,marginBottom:20}}>
+                <p style={{fontSize:11,color:"var(--t3)",marginBottom:4}}>PROTOCOLO</p>
+                <p style={{fontFamily:"var(--fn2)",fontSize:20,fontWeight:700,color:"var(--ac)",letterSpacing:1}}>{saved.protocolo}</p>
+              </div>
+              <div className="notif">
+                <p>📱 Mensagem pronta para WhatsApp:</p>
+                <code>Olá, {saved.morador}. Sua encomenda foi recebida na portaria. Protocolo: {saved.protocolo}.</code>
+                <div style={{display:"flex",gap:10}}>
+                  {waPhone&&<a href={`https://wa.me/55${waPhone}?text=${waMsg}`} target="_blank" rel="noreferrer" className="btn bgr" style={{flex:1,justifyContent:"center",textDecoration:"none"}}>
+                    <Icon n="whatsapp"/> Abrir WhatsApp
+                  </a>}
+                  <button className="btn bg2" style={{flex:1}} onClick={onClose}>Fechar</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        {step!==3&&(
+          <div className="mf">
+            {step===2&&<button className="btn bg2" onClick={()=>setStep(1)}>← Voltar</button>}
+            {step===1&&<button className="btn bg2" onClick={onClose}>Cancelar</button>}
+            {step===2&&<button className="btn bp" onClick={handleSave} disabled={saving}>
+              {saving?<><span className="spin"/> Salvando...</>:<><Icon n="check"/> Salvar Encomenda</>}
+            </button>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── PAGINAÇÃO ────────────────────────────────────────────────────────────────
+const Pagination = ({ total, page, perPage, setPage, setPerPage }) => {
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  if (total === 0) return null;
+  const from = (page - 1) * perPage + 1;
+  const to = Math.min(page * perPage, total);
+  // Gera botões de página inteligentes
+  const getPages = () => {
+    if (pages <= 7) return Array.from({length: pages}, (_, i) => i + 1);
+    const arr = [1];
+    if (page > 3) arr.push("...");
+    for (let i = Math.max(2, page - 1); i <= Math.min(pages - 1, page + 1); i++) arr.push(i);
+    if (page < pages - 2) arr.push("...");
+    arr.push(pages);
+    return arr;
+  };
+  return (
+    <div className="pgn">
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <span className="pgn-info">Mostrando {from}–{to} de {total}</span>
+        <select className="pgn-size" value={perPage} onChange={e=>{setPerPage(Number(e.target.value));setPage(1);}}>
+          {[15,25,50,100].map(n=><option key={n} value={n}>{n} por página</option>)}
+        </select>
+      </div>
+      <div className="pgn-btns">
+        <button className="pgn-btn" disabled={page===1} onClick={()=>setPage(1)} title="Primeira">«</button>
+        <button className="pgn-btn" disabled={page===1} onClick={()=>setPage(p=>p-1)} title="Anterior">‹</button>
+        {getPages().map((p,i)=> p==="..."
+          ? <span key={`e${i}`} style={{color:"var(--t3)",padding:"0 4px",fontSize:13}}>…</span>
+          : <button key={p} className={`pgn-btn${page===p?" on":""}`} onClick={()=>setPage(p)}>{p}</button>
+        )}
+        <button className="pgn-btn" disabled={page===pages} onClick={()=>setPage(p=>p+1)} title="Próxima">›</button>
+        <button className="pgn-btn" disabled={page===pages} onClick={()=>setPage(pages)} title="Última">»</button>
+      </div>
+    </div>
+  );
+};
+
+// ─── ENCOMENDAS ───────────────────────────────────────────────────────────────
+const DIAS_AUTO_LIMPAR = 15;
+
+const Encomendas = ({ encomendas, setEncomendas, moradores, user, addLog }) => {
+  const [showModal, setShowModal] = useState(false);
+  const [dbLoad, setDbLoad]       = useState(false);
+  const [offline, setOffline]     = useState(false);
+  const [offlineTs, setOfflineTs] = useState(null);
+  const [srch, setSrch] = useState(""); const [fs, setFs] = useState(""); const [fb, setFb] = useState("");
+  const [pg, setPg]     = useState(1);
+  const [perPg, setPerPg] = useState(25);
+  const [delId, setDelId]   = useState(null);
+  const [limpInfo, setLimpInfo] = useState(null);
+  const [showLimp, setShowLimp] = useState(false);
+
+  useEffect(() => {
+    if(!DB_OK) return;
+    setDbLoad(true);
+    dbSafe.getAll("encomendas").then(res => {
+      if(Array.isArray(res.data)) setEncomendas(res.data);
+      setOffline(res.offline); setOfflineTs(res.ts||null);
+    }).finally(()=>setDbLoad(false));
+  }, []);
+
+  // Limpeza automática ao carregar
+  useEffect(() => {
+    if(!encomendas.length) return;
+    const limite = new Date(Date.now() - DIAS_AUTO_LIMPAR * 86400000);
+    const velhas = encomendas.filter(e =>
+      e.status === "retirada" && e.retirado_em && new Date(e.retirado_em) < limite
+    );
+    if(!velhas.length) return;
+    const ids = new Set(velhas.map(e=>e.id));
+    setEncomendas(p => p.filter(e => !ids.has(e.id)));
+    addLog({ acao:`Auto-limpeza: ${velhas.length} removidas`, protocolo:"—", usuario:"Sistema", data:new Date().toISOString() });
+    setLimpInfo({ qtd: velhas.length, data: new Date().toLocaleString("pt-BR") });
+  }, []);
+
+  const blocos   = [...new Set(encomendas.map(e=>e.bloco))].sort();
+  const filtered = encomendas.filter(e=>
+    (!srch||e.morador.toLowerCase().includes(srch.toLowerCase())||e.protocolo.toLowerCase().includes(srch.toLowerCase())||e.apartamento.includes(srch))&&
+    (!fs||e.status===fs)&&(!fb||e.bloco===fb)
+  ).sort((a,b)=>new Date(b.criado_em)-new Date(a.criado_em));
+
+  useEffect(()=>setPg(1), [srch, fs, fb]);
+  const pageData = filtered.slice((pg-1)*perPg, pg*perPg);
+
+  const limite15  = new Date(Date.now() - DIAS_AUTO_LIMPAR * 86400000);
+  const elegiveis = encomendas.filter(e => e.status==="retirada" && e.retirado_em && new Date(e.retirado_em) < limite15);
+  const retiradas = encomendas.filter(e => e.status==="retirada");
+
+  const handleSave = enc => {
+    setEncomendas(p=>[enc,...p]);
+    addLog({acao:"Encomenda criada",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});
+    setShowModal(false); setPg(1);
+  };
+
+  const excluirUm = (id) => {
+    const enc = encomendas.find(e=>e.id===id);
+    setEncomendas(p=>p.filter(e=>e.id!==id));
+    if(enc) addLog({acao:"Encomenda excluída",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});
+    setDelId(null);
+  };
+
+  const limparAntigas = () => {
+    const ids = new Set(elegiveis.map(e=>e.id));
+    setEncomendas(p=>p.filter(e=>!ids.has(e.id)));
+    addLog({acao:`Limpeza manual: ${elegiveis.length} removidas`,protocolo:"—",usuario:user.nome,data:new Date().toISOString()});
+    setShowLimp(false);
+  };
+
+  const limparTodas = () => {
+    setEncomendas(p=>p.filter(e=>e.status!=="retirada"));
+    addLog({acao:`Limpeza total: ${retiradas.length} retiradas removidas`,protocolo:"—",usuario:user.nome,data:new Date().toISOString()});
+    setShowLimp(false);
+  };
+
+  const retryOnline = () => {
+    setDbLoad(true);
+    dbSafe.getAll("encomendas").then(res=>{
+      if(Array.isArray(res.data)) setEncomendas(res.data);
+      setOffline(res.offline); setOfflineTs(res.ts||null);
+    }).finally(()=>setDbLoad(false));
+  };
+
+  return (
+    <div>
+      <Banner/>
+      {limpInfo && (
+        <div style={{background:"var(--gd)",border:"1px solid #10b98133",borderRadius:"var(--rs)",padding:"10px 16px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between",fontSize:13,color:"var(--gn)"}}>
+          <span>🧹 Auto-limpeza: <strong>{limpInfo.qtd} encomendas</strong> retiradas há +{DIAS_AUTO_LIMPAR}d removidas em {limpInfo.data}</span>
+          <button onClick={()=>setLimpInfo(null)} style={{background:"none",border:"none",color:"var(--gn)",cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
+        </div>
+      )}
+      {DB_OK && offline && (
+        <div className="offbanner">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="1" y1="1" x2="23" y2="23"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"/>
+            <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+            <line x1="12" y1="20" x2="12.01" y2="20"/>
+          </svg>
+          <span>
+            <strong>Modo offline</strong> — cache{offlineTs && <> de {new Date(offlineTs).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}</>}.
+            <button onClick={retryOnline} style={{marginLeft:10,background:"none",border:"none",color:"var(--ac)",cursor:"pointer",fontWeight:700,fontSize:13,padding:0}}>↺ Reconectar</button>
+          </span>
+        </div>
+      )}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,gap:10,flexWrap:"wrap"}}>
+        <button className="btn bs" onClick={()=>setShowLimp(true)} style={{position:"relative"}}>
+          🧹 Gerenciar Limpeza
+          {elegiveis.length>0 && <span style={{position:"absolute",top:-6,right:-6,background:"var(--rd)",color:"#fff",borderRadius:"99px",fontSize:10,fontWeight:700,padding:"2px 6px"}}>{elegiveis.length}</span>}
+        </button>
+        <button className="btn bp blg" onClick={()=>setShowModal(true)}><Icon n="plus"/> Nova Encomenda</button>
+      </div>
+      <div className="sbar">
+        <div className="sw" style={{flex:2}}><Icon n="search"/><input className="inp" placeholder="Morador, protocolo, apartamento..." value={srch} onChange={e=>setSrch(e.target.value)}/></div>
+        <select className="inp" style={{width:160}} value={fs} onChange={e=>setFs(e.target.value)}>
+          <option value="">Todos os status</option><option value="pendente">Pendente</option><option value="retirada">Retirada</option>
+        </select>
+        <select className="inp" style={{width:140}} value={fb} onChange={e=>setFb(e.target.value)}>
+          <option value="">Todos os blocos</option>{blocos.map(b=><option key={b}>{b}</option>)}
+        </select>
+      </div>
+      <div className="card">
+        <div className="ch">
+          <h3>Encomendas ({filtered.length})</h3>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            {offline && <span style={{fontSize:11,color:"var(--ac)",fontWeight:600}}>📦 CACHE</span>}
+            {dbLoad && <span className="spin"/>}
+          </div>
+        </div>
+        <div className="tw"><table>
+          <thead><tr><th>Protocolo</th><th>Morador</th><th>Transportadora</th><th>Rastreio</th><th>Status</th><th>Recebida</th><th></th></tr></thead>
+          <tbody>
+            {pageData.length===0 && <tr><td colSpan={7}><div className="empty"><Icon n="package"/><p>Nenhuma encomenda</p></div></td></tr>}
+            {pageData.map(e => {
+              const diasRet = e.retirado_em ? getDias(e.retirado_em) : null;
+              const expirado = diasRet !== null && diasRet >= DIAS_AUTO_LIMPAR;
+              return (
+                <tr key={e.id} style={expirado?{opacity:0.55}:{}}>
+                  <td><code style={{fontSize:11,color:"var(--t3)"}}>{e.protocolo}</code></td>
+                  <td><strong>{e.morador}</strong><br/><span style={{fontSize:11,color:"var(--t3)"}}>Bl {e.bloco} / Ap {e.apartamento}</span></td>
+                  <td>{e.transportadora||"—"}</td>
+                  <td><code style={{fontSize:11,color:"var(--bl)"}}>{e.rastreio||"—"}</code></td>
+                  <td>
+                    <span className={`badge ${e.status==="pendente"?"by":"bg"}`}>{e.status==="pendente"?"⏳ Pendente":"✓ Retirada"}</span>
+                    {expirado && <><br/><span style={{fontSize:10,color:"var(--rd)",fontWeight:600}}>🗑 {diasRet}d — expira</span></>}
+                  </td>
+                  <td style={{fontSize:11}}>{fmtDate(e.criado_em)}<br/><span style={{color:"var(--t3)"}}>{e.criado_por}</span></td>
+                  <td><button className="btn bd bsm" title="Excluir" onClick={()=>setDelId(e.id)}><Icon n="trash"/></button></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table></div>
+        <Pagination total={filtered.length} page={pg} perPage={perPg} setPage={setPg} setPerPage={setPerPg}/>
+      </div>
+      {showModal && <NovaModal moradores={moradores} onSave={handleSave} onClose={()=>setShowModal(false)} user={user}/>}
+      {delId && (
+        <div className="ov" onClick={()=>setDelId(null)}>
+          <div className="modal" style={{maxWidth:340}} onClick={e=>e.stopPropagation()}>
+            <div className="mb" style={{textAlign:"center",padding:32}}>
+              <div style={{fontSize:36,marginBottom:12}}>🗑️</div>
+              <h3 style={{marginBottom:8}}>Excluir encomenda?</h3>
+              <code style={{fontSize:11,color:"var(--t3)",display:"block",marginBottom:8}}>{encomendas.find(e=>e.id===delId)?.protocolo}</code>
+              <p style={{color:"var(--t3)",fontSize:13,marginBottom:24}}>Esta ação não pode ser desfeita.</p>
+              <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+                <button className="btn bg2" onClick={()=>setDelId(null)}>Cancelar</button>
+                <button className="btn bd" onClick={()=>excluirUm(delId)}>Excluir</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {showLimp && (
+        <div className="ov" onClick={()=>setShowLimp(false)}>
+          <div className="modal" style={{maxWidth:480}} onClick={e=>e.stopPropagation()}>
+            <div className="mh"><h3>🧹 Gerenciar Limpeza</h3><button className="xb" onClick={()=>setShowLimp(false)}><Icon n="x"/></button></div>
+            <div className="mb">
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:20}}>
+                {[
+                  {label:"Total no sistema",val:encomendas.length,color:"var(--bl)"},
+                  {label:"Retiradas",val:retiradas.length,color:"var(--gn)"},
+                  {label:`+${DIAS_AUTO_LIMPAR}d elegíveis`,val:elegiveis.length,color:"var(--rd)"},
+                ].map(s=>(
+                  <div key={s.label} style={{background:"var(--s2)",borderRadius:"var(--rs)",padding:12,textAlign:"center",border:"1px solid var(--b1)"}}>
+                    <p style={{fontSize:22,fontWeight:700,fontFamily:"var(--fn2)",color:s.color}}>{s.val}</p>
+                    <p style={{fontSize:11,color:"var(--t3)",marginTop:2}}>{s.label}</p>
+                  </div>
+                ))}
+              </div>
+              <div style={{background:"var(--gd)",border:"1px solid #10b98133",borderRadius:"var(--rs)",padding:14,marginBottom:12,fontSize:13,color:"var(--gn)"}}>
+                <p style={{fontWeight:700,marginBottom:4}}>✅ Limpeza automática ativa</p>
+                <p>Encomendas retiradas há mais de <strong>{DIAS_AUTO_LIMPAR} dias</strong> são removidas automaticamente ao abrir o sistema.</p>
+              </div>
+              <div style={{background:"var(--s2)",border:"1px solid var(--b1)",borderRadius:"var(--rs)",padding:14,marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <p style={{fontWeight:600,fontSize:13,color:"var(--t1)"}}>Remover retiradas com +{DIAS_AUTO_LIMPAR} dias</p>
+                    <p style={{fontSize:12,color:"var(--t3)",marginTop:2}}>{elegiveis.length} encomendas elegíveis</p>
+                  </div>
+                  <button className="btn bd" disabled={elegiveis.length===0} onClick={limparAntigas}>🗑 Limpar ({elegiveis.length})</button>
+                </div>
+              </div>
+              <div style={{background:"var(--rdd)",border:"1px solid #ef444433",borderRadius:"var(--rs)",padding:14}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <p style={{fontWeight:600,fontSize:13,color:"var(--rd)"}}>⚠️ Remover TODAS as retiradas</p>
+                    <p style={{fontSize:12,color:"var(--t3)",marginTop:2}}>{retiradas.length} encomendas · irreversível</p>
+                  </div>
+                  <button className="btn bd" disabled={retiradas.length===0} onClick={limparTodas}>🗑 Tudo ({retiradas.length})</button>
+                </div>
+              </div>
+            </div>
+            <div className="mf"><button className="btn bg2" onClick={()=>setShowLimp(false)}>Fechar</button></div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── RETIRADA ─────────────────────────────────────────────────────────────────
+const Retirada = ({ encomendas, setEncomendas, user, addLog }) => {
+  const [srch, setSrch] = useState("");
+  const [searchMode, setSearchMode] = useState("nome"); // "nome" | "protocolo"
+  const [sel, setSel] = useState(null);
+  const [photo, setPhoto] = useState(null);
+  const [done, setDone] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [protocoloInput, setProtocoloInput] = useState("");
+  const [protocoloErr, setProtocoloErr] = useState("");
+  const srchRef = useRef();
+  const fRef = useRef();
+
+  const pend = encomendas.filter(e => {
+    if (e.status !== "pendente") return false;
+    if (!srch) return true;
+    const q = srch.toLowerCase();
+    if (searchMode === "protocolo") return e.protocolo.toLowerCase().includes(q);
+    return e.morador.toLowerCase().includes(q) || e.apartamento.includes(q) || e.bloco.toLowerCase().includes(q);
+  });
+
+  const buscarPorProtocolo = () => {
+    const p = protocoloInput.trim().toUpperCase();
+    if (!p) { setProtocoloErr("Digite o protocolo ou código de rastreio."); return; }
+    const enc = encomendas.find(e => e.status === "pendente" &&
+      (e.protocolo.toUpperCase() === p || (e.rastreio && e.rastreio.toUpperCase() === p))
+    );
+    if (enc) { setProtocoloErr(""); setSel(enc); }
+    else { setProtocoloErr(`Nenhuma encomenda pendente com protocolo "${p}"`); }
+  };
+
+  const confirm = async () => {
+    if(!photo) return alert("Foto de retirada obrigatória.");
+    setSaving(true);
+    const now=new Date().toISOString();
+    const upd={status:"retirada",retirado_em:now,retirado_por:user.nome};
+    if(DB_OK) await db.update("encomendas",sel.id,upd);
+    setEncomendas(p=>p.map(e=>e.id===sel.id?{...e,...upd}:e));
+    addLog({acao:"Retirada confirmada",protocolo:sel.protocolo,usuario:user.nome,data:now});
+    setSaving(false); setDone(true);
+  };
+
+  const reset = () => { setSel(null); setPhoto(null); setDone(false); setProtocoloInput(""); setProtocoloErr(""); };
+
+  return (
+    <div>
+      <Banner/>
+      {/* PAINEL DE BUSCA */}
+      <div style={{background:"var(--sf)",border:"1px solid var(--b1)",borderRadius:"var(--r)",padding:20,marginBottom:20}}>
+        <p style={{fontSize:13,color:"var(--t2)",marginBottom:14,fontWeight:600}}>Buscar encomenda pendente</p>
+        {/* Abas de modo */}
+        <div style={{display:"flex",gap:6,marginBottom:14}}>
+          {[{k:"nome",l:"🔍 Por nome / apartamento"},{k:"protocolo",l:"📋 Por protocolo / rastreio"}].map(m=>(
+            <button key={m.k}
+              className={`scan-tab${searchMode===m.k?" on":""}`}
+              onClick={()=>{setSearchMode(m.k);setSrch("");setProtocoloInput("");setProtocoloErr("");}}
+            >{m.l}</button>
+          ))}
+        </div>
+
+        {searchMode==="nome" && (
+          <div className="sw">
+            <Icon n="search"/>
+            <input ref={srchRef} className="inp" style={{fontSize:15}} placeholder="Nome, bloco ou apartamento..." value={srch} onChange={e=>setSrch(e.target.value)}/>
+          </div>
+        )}
+
+        {searchMode==="protocolo" && (
+          <div>
+            <div style={{display:"flex",gap:10}}>
+              <input
+                className="inp"
+                style={{fontSize:15,flex:1,letterSpacing:1,fontFamily:"monospace",borderColor: protocoloErr?"var(--rd)":"var(--b2)"}}
+                placeholder="PX-2025-0601-1234 ou BR123456789BR"
+                value={protocoloInput}
+                onChange={e=>{setProtocoloInput(e.target.value);setProtocoloErr("");}}
+                onKeyDown={e=>e.key==="Enter"&&buscarPorProtocolo()}
+                autoFocus
+              />
+              <button className="btn bp" onClick={buscarPorProtocolo} style={{flexShrink:0}}>
+                <Icon n="search"/> Buscar
+              </button>
+            </div>
+            {protocoloErr && (
+              <p style={{color:"var(--rd)",fontSize:12,marginTop:8,display:"flex",alignItems:"center",gap:6}}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" style={{width:14,height:14,flexShrink:0}}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                {protocoloErr}
+              </p>
+            )}
+            <p style={{fontSize:11,color:"var(--t3)",marginTop:8}}>💡 Aceita o protocolo interno (PX-…) ou o código de rastreio da transportadora</p>
+          </div>
+        )}
+      </div>
+
+      {/* TABELA DE RESULTADOS (apenas no modo nome) */}
+      {searchMode === "nome" && (
+        <div className="card">
+          <div className="ch"><h3>Pendentes {srch ? `para "${srch}"` : ""} ({pend.length})</h3></div>
+          <div className="tw"><table>
+            <thead><tr><th>Morador</th><th>Protocolo</th><th>Bloco/Ap</th><th>Transportadora</th><th>Recebida</th><th>Ação</th></tr></thead>
+            <tbody>
+              {pend.length===0&&<tr><td colSpan={6}><div className="empty"><Icon n="check"/><p>{srch?"Nenhum resultado":"Nenhuma encomenda pendente 🎉"}</p></div></td></tr>}
+              {pend.map(e=>(
+                <tr key={e.id}>
+                  <td><strong>{e.morador}</strong></td>
+                  <td><code style={{fontSize:11,color:"var(--t3)"}}>{e.protocolo}</code></td>
+                  <td>Bl <strong>{e.bloco}</strong> / Ap <strong>{e.apartamento}</strong></td>
+                  <td>{e.transportadora||"—"}</td>
+                  <td style={{fontSize:11}}>{fmtDate(e.criado_em)}</td>
+                  <td><button className="btn bgr" onClick={()=>setSel(e)}><Icon n="check"/> Confirmar Retirada</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+        </div>
+      )}
+
+      {/* MODAL CONFIRMAÇÃO */}
+      {sel&&(
+        <div className="ov" onClick={reset}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="mh"><h3>Confirmar Retirada</h3><button className="xb" onClick={reset}><Icon n="x"/></button></div>
+            <div className="mb">
+              {!done?(
+                <>
+                  <div style={{background:"var(--s2)",border:"1px solid var(--b1)",borderRadius:"var(--rs)",padding:14,marginBottom:16}}>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                      <div>
+                        <p style={{fontSize:11,color:"var(--t3)",marginBottom:4}}>PROTOCOLO</p>
+                        <p style={{fontFamily:"var(--fn2)",fontSize:16,fontWeight:700,color:"var(--ac)"}}>{sel.protocolo}</p>
+                      </div>
+                      <div>
+                        <p style={{fontSize:11,color:"var(--t3)",marginBottom:4}}>MORADOR</p>
+                        <p style={{fontSize:14,fontWeight:600}}>{sel.morador}</p>
+                        <p style={{fontSize:12,color:"var(--t3)"}}>Bl {sel.bloco} / Ap {sel.apartamento}</p>
+                      </div>
+                    </div>
+                    {sel.transportadora && <div style={{marginTop:10,paddingTop:10,borderTop:"1px solid var(--b1)"}}>
+                      <p style={{fontSize:11,color:"var(--t3)"}}>TRANSPORTADORA: <strong style={{color:"var(--t2)"}}>{sel.transportadora}</strong>
+                      {sel.rastreio && <> · RASTREIO: <code style={{color:"var(--bl)",fontSize:11}}>{sel.rastreio}</code></>}</p>
+                    </div>}
+                  </div>
+                  <div className="f">
+                    <label>FOTO DE RETIRADA *</label>
+                    <div className="uz" onClick={()=>fRef.current?.click()}>
+                      <Icon n="camera"/><p>Foto de quem está retirando a encomenda</p>
+                      <input ref={fRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>{if(e.target.files[0]){const r=new FileReader();r.onload=ev=>setPhoto(ev.target.result);r.readAsDataURL(e.target.files[0])}}}/>
+                    </div>
+                    {photo&&<img src={photo} className="prev" alt="foto"/>}
+                  </div>
+                </>
+              ):(
+                <div style={{textAlign:"center",padding:20}}>
+                  <div style={{fontSize:48,marginBottom:16}}>✅</div>
+                  <h3 style={{color:"var(--gn)",marginBottom:8}}>Retirada confirmada{DB_OK?" no banco":""}!</h3>
+                  <p style={{color:"var(--t3)",fontSize:13}}>Registrado por <strong>{user.nome}</strong></p>
+                  <button className="btn bg2" style={{marginTop:20}} onClick={reset}>Fechar</button>
+                </div>
+              )}
+            </div>
+            {!done&&<div className="mf">
+              <button className="btn bg2" onClick={reset}>Cancelar</button>
+              <button className="btn bgr blg" onClick={confirm} disabled={saving}>
+                {saving?<><span className="spin"/> Salvando...</>:<><Icon n="check"/> Confirmar Retirada</>}
+              </button>
+            </div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── RELATÓRIOS ───────────────────────────────────────────────────────────────
+const Relatorios = ({ encomendas, user }) => {
+  const readonly = isReadonly(user.perfil, "relatorios");
+  const [fs,setFs]=useState(""); const [fb,setFb]=useState(""); const [fm,setFm]=useState(""); const [di,setDi]=useState(""); const [df,setDf]=useState("");
+  const blocos=[...new Set(encomendas.map(e=>e.bloco))].sort();
+  const list=encomendas.filter(e=>{
+    if(fs&&e.status!==fs) return false;
+    if(fb&&e.bloco!==fb) return false;
+    if(fm&&!e.morador.toLowerCase().includes(fm.toLowerCase())) return false;
+    if(di&&new Date(e.criado_em)<new Date(di)) return false;
+    if(df&&new Date(e.criado_em)>new Date(df+"T23:59:59")) return false;
+    return true;
+  }).sort((a,b)=>new Date(b.criado_em)-new Date(a.criado_em));
+  return (
+    <div>
+      <div className="card" style={{marginBottom:20}}>
+        <div className="ch"><h3>Filtros</h3></div>
+        <div style={{padding:16,display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:14}}>
+          <div className="f"><label>STATUS</label><select className="inp" value={fs} onChange={e=>setFs(e.target.value)}><option value="">Todos</option><option value="pendente">Pendente</option><option value="retirada">Retirada</option></select></div>
+          <div className="f"><label>BLOCO</label><select className="inp" value={fb} onChange={e=>setFb(e.target.value)}><option value="">Todos</option>{blocos.map(b=><option key={b}>{b}</option>)}</select></div>
+          <div className="f"><label>MORADOR</label><input className="inp" value={fm} onChange={e=>setFm(e.target.value)} placeholder="Filtrar..."/></div>
+          <div className="f"><label>DATA INÍCIO</label><input className="inp" type="date" value={di} onChange={e=>setDi(e.target.value)}/></div>
+          <div className="f"><label>DATA FIM</label><input className="inp" type="date" value={df} onChange={e=>setDf(e.target.value)}/></div>
+        </div>
+      </div>
+      <div className="card">
+        <div className="ch">
+          <div><h3>Histórico</h3><p>{list.length} registros</p></div>
+          {!readonly && <button className="btn bs" onClick={()=>doExport(list.map(e=>({Protocolo:e.protocolo,Morador:e.morador,Bloco:e.bloco,Ap:e.apartamento,Transportadora:e.transportadora||"",Status:e.status,Recebida:fmtDate(e.criado_em),Retirada:fmtDate(e.retirado_em)})),"relatorio.csv")}>
+            <Icon n="download"/> Exportar CSV
+          </button>}
+        </div>
+        <div className="tw"><table>
+          <thead><tr><th>Protocolo</th><th>Morador</th><th>Bloco/Ap</th><th>Transportadora</th><th>Status</th><th>Recebida</th><th>Retirada</th></tr></thead>
+          <tbody>
+            {list.length===0&&<tr><td colSpan={7}><div className="empty"><Icon n="report"/><p>Sem registros</p></div></td></tr>}
+            {list.map(e=>(
+              <tr key={e.id}>
+                <td><code style={{fontSize:11,color:"var(--t3)"}}>{e.protocolo}</code></td>
+                <td><strong>{e.morador}</strong></td>
+                <td>Bl {e.bloco}/Ap {e.apartamento}</td>
+                <td>{e.transportadora||"—"}</td>
+                <td><span className={`badge ${e.status==="pendente"?"by":"bg"}`}>{e.status==="pendente"?"⏳ Pendente":"✓ Retirada"}</span></td>
+                <td style={{fontSize:11}}>{fmtDate(e.criado_em)}</td>
+                <td style={{fontSize:11}}>{fmtDate(e.retirado_em)}{e.retirado_por&&<><br/><span style={{color:"var(--t3)"}}>{e.retirado_por}</span></>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      </div>
+    </div>
+  );
+};
+
+// ─── LOGS ─────────────────────────────────────────────────────────────────────
+const Logs = ({ logs }) => (
+  <div className="card">
+    <div className="ch"><h3>Logs de Auditoria</h3><p>{logs.length} registros</p></div>
+    <div className="tw"><table>
+      <thead><tr><th>#</th><th>Ação</th><th>Protocolo</th><th>Usuário</th><th>Data/Hora</th></tr></thead>
+      <tbody>
+        {logs.length===0&&<tr><td colSpan={5}><div className="empty"><Icon n="log"/><p>Nenhum log</p></div></td></tr>}
+        {[...logs].reverse().map((l,i)=>(
+          <tr key={l.id||i}>
+            <td style={{color:"var(--t3)",fontSize:11}}>{logs.length-i}</td>
+            <td><span className="badge bb">{l.acao}</span></td>
+            <td><code style={{fontSize:11,color:"var(--t3)"}}>{l.protocolo}</code></td>
+            <td><strong>{l.usuario}</strong></td>
+            <td style={{fontSize:11}}>{fmtDate(l.data)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table></div>
+  </div>
+);
+
+// ─── CONFIGURAÇÕES ────────────────────────────────────────────────────────────
+const Configuracoes = () => {
+  const [key, setKey] = useState(() => { try { return localStorage.getItem("px_anthropic_key") || ""; } catch { return ""; } });
+  const [show, setShow] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const salvar = () => {
+    try { localStorage.setItem("px_anthropic_key", key.trim()); setSaved(true); setTimeout(()=>setSaved(false), 2500); } catch {}
+  };
+  const limpar = () => { try { localStorage.removeItem("px_anthropic_key"); setKey(""); setSaved(false); } catch {} };
+
+  const keyAtiva = ANTHROPIC_KEY_CONFIG.includes("COLE") ? key.trim() : ANTHROPIC_KEY_CONFIG;
+  const provider = getIAProvider(keyAtiva);
+  const keyOk = !!provider;
+  const providerLabel = provider === "anthropic" ? "✓ Anthropic" : provider === "gemini" ? "✓ Gemini" : provider === "deepseek" ? "⚠ DeepSeek (sem visão)" : "⚠ Não configurada";
+  const providerColor = keyOk ? "bg" : "by";
+
+  return (
+    <div>
+      <div className="card" style={{marginBottom:20}}>
+        <div className="ch">
+          <div>
+            <h3>🤖 API Key — Leitura de Etiqueta com IA</h3>
+            <p>Necessária para o botão "Ler com IA" na Nova Encomenda</p>
+          </div>
+          <span className={`badge ${providerColor}`}>{providerLabel}</span>
+        </div>
+        <div style={{padding:20}}>
+          {!ANTHROPIC_KEY_CONFIG.includes("COLE") ? (
+            <div style={{background:"var(--gd)",border:"1px solid #10b98133",borderRadius:"var(--rs)",padding:12,marginBottom:16,fontSize:13,color:"var(--gn)"}}>
+              ✅ Key configurada no código-fonte.
+            </div>
+          ) : (
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:20}}>
+                {[
+                  {name:"Gemini",prefix:"AIza...",url:"aistudio.google.com/apikey",color:"#10b981",tag:"✓ Gratuito + Visão"},
+                  {name:"Anthropic",prefix:"sk-ant-...",url:"console.anthropic.com",color:"var(--ac)",tag:"Pago + Visão"},
+                  {name:"DeepSeek",prefix:"sk-...",url:"platform.deepseek.com",color:"#3b82f6",tag:"⚠ Sem visão"},
+                ].map(p=>{
+                  const ativo = keyAtiva && getIAProvider(keyAtiva)===p.name.toLowerCase();
+                  return (
+                  <div key={p.name} style={{background:"var(--s2)",border:`1.5px solid ${ativo?p.color+"88":"var(--b1)"}`,borderRadius:"var(--rs)",padding:12}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <p style={{fontWeight:700,fontSize:13,color:"var(--t1)"}}>{p.name}</p>
+                      <span style={{fontSize:10,color:p.color,fontWeight:600}}>{p.tag}</span>
+                    </div>
+                    <p style={{fontSize:11,color:"var(--t3)",marginBottom:4}}>Formato: <code style={{color:p.color}}>{p.prefix}</code></p>
+                    <p style={{fontSize:11,color:"var(--t3)"}}>→ {p.url}</p>
+                  </div>
+                );})}
+              </div>
+              <div className="f">
+                <label>API KEY</label>
+                <div style={{position:"relative"}}>
+                  <input className="inp" type={show?"text":"password"} value={key}
+                    onChange={e=>{setKey(e.target.value);setSaved(false);}}
+                    placeholder="sk-..." style={{paddingRight:44,fontFamily:"monospace",fontSize:13}}/>
+                  <button onClick={()=>setShow(s=>!s)} style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",color:"var(--t3)",padding:4,border:"none",cursor:"pointer"}}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{width:16,height:16}}>{show?ICONS.eyeoff:ICONS.eye}</svg>
+                  </button>
+                </div>
+                {key && !keyOk && <p style={{color:"var(--rd)",fontSize:12,marginTop:6}}>⚠️ Formato não reconhecido. Use DeepSeek (sk-...) ou Anthropic (sk-ant-...)</p>}
+                {key && keyOk && <p style={{color:"var(--gn)",fontSize:12,marginTop:6}}>✅ Provider detectado: <strong>{provider==="deepseek"?"DeepSeek ⚠ (sem visão)":provider==="gemini"?"Gemini ✓":"Anthropic ✓"}</strong></p>}
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button className="btn bp" onClick={salvar} disabled={!key.trim()}>{saved?"✅ Salvo!":"💾 Salvar Key"}</button>
+                {key && <button className="btn bd" onClick={limpar}>🗑️ Remover</button>}
+              </div>
+              <div style={{marginTop:20,background:"#f59e0b0d",border:"1px solid #f59e0b33",borderRadius:"var(--rs)",padding:12,fontSize:12,color:"var(--t3)"}}>
+                🔒 A key fica salva só no seu navegador (localStorage) e é enviada apenas para a API do provider escolhido.
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// ─── APP ──────────────────────────────────────────────────────────────────────
+// ─── USUÁRIOS ─────────────────────────────────────────────────────────────────
+const Usuarios = ({ users, setUsers, currentUser }) => {
+  const [modal, setModal] = useState(null);
+  const [form, setForm] = useState({});
+  const [showSenha, setShowSenha] = useState(false);
+  const [delId, setDelId] = useState(null);
+
+  const save = () => {
+    if(!form.nome||!form.login||!form.senha) return alert("Preencha nome, login e senha.");
+    const loginJaExiste = users.some(u => u.login === form.login.trim() && u.id !== form.id);
+    if(loginJaExiste) return alert("Este login já está em uso. Escolha outro.");
+    const novoUser = {...form, login: form.login.trim(), nome: form.nome.trim()};
+    if(modal==="novo") setUsers(p=>[...p,{...novoUser,id:Date.now()}]);
+    else setUsers(p=>p.map(u=>u.id===form.id?novoUser:u));
+    setModal(null);
+  };
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginBottom:20}}>
+        <button className="btn bp" onClick={()=>{setForm({nome:"",login:"",senha:"",perfil:"porteiro"});setModal("novo")}}><Icon n="plus"/> Novo Usuário</button>
+      </div>
+      <div className="card"><div className="tw"><table>
+        <thead><tr><th>Nome</th><th>Login</th><th>Perfil</th><th>Ações</th></tr></thead>
+        <tbody>
+          {users.map(u=>(
+            <tr key={u.id}>
+              <td><div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div className="av" style={{width:30,height:30,fontSize:12}}>{u.nome[0]}</div>
+                <strong>{u.nome}</strong>
+              </div></td>
+              <td><code style={{fontSize:12,color:"var(--bl)"}}>{u.login}</code></td>
+              <td><span className={`badge ${u.perfil==="admin"?"by":"bb"}`}>{u.perfil==="admin"?"👑 Admin":"🔧 Porteiro"}</span></td>
+              <td><div style={{display:"flex",gap:6}}>
+                <button className="btn bg2 bsm" onClick={()=>{setForm({...u});setModal("editar")}}><Icon n="edit"/></button>
+                {u.id!==currentUser.id && <button className="btn bd bsm" onClick={()=>setDelId(u.id)}><Icon n="trash"/></button>}
+              </div></td>
+            </tr>
+          ))}
+        </tbody>
+      </table></div></div>
+
+      {(modal==="novo"||modal==="editar")&&(
+        <div className="ov" onClick={()=>setModal(null)}>
+          <div className="modal" style={{maxWidth:440}} onClick={e=>e.stopPropagation()}>
+            <div className="mh"><h3>{modal==="novo"?"Novo Usuário":"Editar Usuário"}</h3><button className="xb" onClick={()=>setModal(null)}><Icon n="x"/></button></div>
+            <div className="mb">
+              <div className="f"><label>NOME COMPLETO *</label><input className="inp" value={form.nome||""} onChange={e=>setForm({...form,nome:e.target.value})} placeholder="Nome do usuário"/></div>
+              <div className="r2">
+                <div className="f"><label>LOGIN *</label><input className="inp" value={form.login||""} onChange={e=>setForm({...form,login:e.target.value})} placeholder="login"/></div>
+                <div className="f"><label>PERFIL</label>
+                  <select className="inp" value={form.perfil||"porteiro"} onChange={e=>setForm({...form,perfil:e.target.value})}>
+                    <option value="porteiro">Porteiro</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </div>
+              </div>
+              <div className="f">
+                <label>SENHA *</label>
+                <div style={{position:"relative"}}>
+                  <input className="inp" type={showSenha?"text":"password"} value={form.senha||""} onChange={e=>setForm({...form,senha:e.target.value})} placeholder="••••••" style={{paddingRight:44}}/>
+                  <button onClick={()=>setShowSenha(s=>!s)} style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",color:"var(--t3)",padding:4}}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{width:16,height:16}}>{showSenha?ICONS.eyeoff:ICONS.eye}</svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="mf"><button className="btn bg2" onClick={()=>setModal(null)}>Cancelar</button><button className="btn bp" onClick={save}>Salvar</button></div>
+          </div>
+        </div>
+      )}
+
+      {delId&&(
+        <div className="ov" onClick={()=>setDelId(null)}>
+          <div className="modal" style={{maxWidth:340}} onClick={e=>e.stopPropagation()}>
+            <div className="mb" style={{textAlign:"center",padding:32}}>
+              <div style={{fontSize:36,marginBottom:16}}>🗑️</div>
+              <h3 style={{marginBottom:8}}>Excluir usuário?</h3>
+              <p style={{color:"var(--t3)",fontSize:13,marginBottom:24}}>Esta ação não pode ser desfeita.</p>
+              <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+                <button className="btn bg2" onClick={()=>setDelId(null)}>Cancelar</button>
+                <button className="btn bd" onClick={()=>{setUsers(p=>p.filter(u=>u.id!==delId));setDelId(null);}}>Excluir</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── NOTIFICAÇÕES ─────────────────────────────────────────────────────────────
+const Notificacoes = ({ encomendas, moradores }) => {
+  const [busca, setBusca] = useState("");
+  const [enviados, setEnviados] = useState({});
+  const [msgCustom, setMsgCustom] = useState(null); // {enc, texto}
+
+  const pendentes = encomendas.filter(e => e.status === "pendente" &&
+    (!busca || e.morador.toLowerCase().includes(busca.toLowerCase()) ||
+     e.apartamento.includes(busca) || e.bloco.toLowerCase().includes(busca.toLowerCase()))
+  ).sort((a,b) => new Date(a.criado_em)-new Date(b.criado_em));
+
+  const getMorador = (enc) => moradores.find(m =>
+    m.nome.toLowerCase() === enc.morador.toLowerCase() ||
+    (m.apartamento === enc.apartamento && m.bloco === enc.bloco)
+  );
+
+  const msgPadrao = (enc) =>
+    `Olá, ${enc.morador.split(" ")[0]}! 📦
+
+Sua encomenda chegou na portaria do condomínio.
+
+Protocolo: *${enc.protocolo}*
+Transportadora: ${enc.transportadora||"—"}
+Rastreio: ${enc.rastreio||"—"}
+
+Por favor, retire em horário comercial.
+
+_Portaria Express_`;
+
+  const abrirWA = (enc, msgOverride) => {
+    const mor = getMorador(enc);
+    const tel = mor?.whatsapp || mor?.telefone || enc.telefone;
+    if(!tel) return alert("Morador sem telefone cadastrado. Adicione o telefone na aba Moradores.");
+    const num = "55" + tel.replace(/\D/g,"");
+    const msg = encodeURIComponent(msgOverride || msgPadrao(enc));
+    window.open(`https://wa.me/${num}?text=${msg}`, "_blank");
+    setEnviados(p=>({...p,[enc.id]:true}));
+  };
+
+  const copiarMsg = (enc) => {
+    navigator.clipboard?.writeText(msgPadrao(enc)).then(()=>alert("Mensagem copiada!"));
+  };
+
+  return (
+    <div>
+      <div style={{background:"var(--gd)",border:"1px solid #10b98133",borderRadius:"var(--rs)",padding:"12px 16px",marginBottom:20,display:"flex",alignItems:"center",gap:10,fontSize:13,color:"var(--gn)"}}>
+        <Icon n="whatsapp"/>
+        <span><strong>{pendentes.length} encomendas</strong> aguardando retirada para notificar</span>
+      </div>
+
+      <div className="sbar">
+        <div className="sw"><Icon n="search"/>
+          <input className="inp" placeholder="Buscar morador, bloco, apartamento..." value={busca} onChange={e=>setBusca(e.target.value)}/>
+        </div>
+      </div>
+
+      {pendentes.length===0 && (
+        <div className="empty"><Icon n="whatsapp"/><p>Nenhuma encomenda pendente para notificar</p></div>
+      )}
+
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {pendentes.map(enc => {
+          const mor = getMorador(enc);
+          const temTel = !!(mor?.whatsapp || mor?.telefone || enc.telefone);
+          const jaEnviou = enviados[enc.id];
+          const diasEsp = Math.floor((Date.now()-new Date(enc.criado_em))/86400000);
+          return (
+            <div key={enc.id} style={{background:"var(--sf)",border:`1.5px solid ${jaEnviou?"#10b98144":diasEsp>=3?"#ef444433":"var(--b1)"}`,borderRadius:"var(--r)",padding:16}}>
+              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12,gap:10}}>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                    <strong style={{fontSize:14}}>{enc.morador}</strong>
+                    {jaEnviou && <span className="badge bg">✓ Notificado</span>}
+                    {diasEsp>=3 && !jaEnviou && <span className="badge br">⚠️ {diasEsp}d esperando</span>}
+                    {diasEsp<3 && !jaEnviou && <span className="badge by">{diasEsp===0?"Hoje":`${diasEsp}d`}</span>}
+                  </div>
+                  <p style={{fontSize:12,color:"var(--t3)"}}>Bl {enc.bloco} / Ap {enc.apartamento} · {enc.transportadora||"—"}</p>
+                  <code style={{fontSize:11,color:"var(--t3)"}}>{enc.protocolo}</code>
+                  {!temTel && <p style={{fontSize:11,color:"var(--rd)",marginTop:4}}>⚠️ Sem telefone cadastrado</p>}
+                  {temTel && <p style={{fontSize:11,color:"var(--t3)",marginTop:2}}>📱 {mor?.whatsapp||mor?.telefone||enc.telefone}</p>}
+                </div>
+              </div>
+
+              <div style={{background:"var(--s2)",borderRadius:"var(--rs)",padding:"10px 12px",marginBottom:12,fontSize:12,color:"var(--t2)",whiteSpace:"pre-line",lineHeight:1.6}}>
+                {msgPadrao(enc)}
+              </div>
+
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <button
+                  className={`btn ${temTel?"bgr":"bg2"}`}
+                  style={{flex:1,justifyContent:"center",minWidth:120}}
+                  onClick={()=>abrirWA(enc)}
+                  disabled={!temTel}
+                >
+                  <Icon n="whatsapp"/> WhatsApp
+                </button>
+                <button className="btn bs" style={{flex:1,justifyContent:"center",minWidth:100}} onClick={()=>copiarMsg(enc)}>
+                  📋 Copiar
+                </button>
+                <button className="btn bs" style={{flex:1,justifyContent:"center",minWidth:100}} onClick={()=>setMsgCustom({enc, texto:msgPadrao(enc)})}>
+                  ✏️ Editar
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {msgCustom && (
+        <div className="ov" onClick={()=>setMsgCustom(null)}>
+          <div className="modal" onClick={e=>e.stopPropagation()}>
+            <div className="mh"><h3>✏️ Editar Mensagem</h3><button className="xb" onClick={()=>setMsgCustom(null)}><Icon n="x"/></button></div>
+            <div className="mb">
+              <p style={{fontSize:12,color:"var(--t3)",marginBottom:10}}>Para: <strong>{msgCustom.enc.morador}</strong> — Bl {msgCustom.enc.bloco}/Ap {msgCustom.enc.apartamento}</p>
+              <div className="f">
+                <label>MENSAGEM</label>
+                <textarea className="inp" style={{minHeight:180,lineHeight:1.6}} value={msgCustom.texto} onChange={e=>setMsgCustom(p=>({...p,texto:e.target.value}))}/>
+              </div>
+            </div>
+            <div className="mf">
+              <button className="btn bg2" onClick={()=>setMsgCustom(null)}>Cancelar</button>
+              <button className="btn bs" onClick={()=>{navigator.clipboard?.writeText(msgCustom.texto).then(()=>alert("Copiado!"));setMsgCustom(null);}}>📋 Copiar</button>
+              <button className="btn bgr" onClick={()=>{abrirWA(msgCustom.enc,msgCustom.texto);setMsgCustom(null);}}>
+                <Icon n="whatsapp"/> Enviar WhatsApp
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const META = {
+  dashboard:     {title:"Dashboard",       desc:"Visão geral do sistema"},
+  encomendas:    {title:"Encomendas",      desc:"Registrar e gerenciar encomendas"},
+  retirada:      {title:"Retirada",        desc:"Confirmar retirada de pacotes"},
+  moradores:     {title:"Moradores",       desc:"Cadastro de moradores"},
+  relatorios:    {title:"Relatórios",      desc:"Histórico e exportação"},
+  logs:          {title:"Auditoria",       desc:"Log de ações do sistema"},
+  usuarios:      {title:"Usuários",        desc:"Gerenciar acessos ao sistema"},
+  notificacoes:  {title:"Notificações",    desc:"Avisar moradores sobre encomendas"},
+  configuracoes: {title:"Configurações",   desc:"API Key e preferências do sistema"},
+};
+
+const ALL_MOB_NAV = [
+  {id:"dashboard",l:"Início",i:"dashboard"},
+  {id:"encomendas",l:"Encomendas",i:"package"},
+  {id:"retirada",l:"Retirada",i:"check"},
+  {id:"notificacoes",l:"WhatsApp",i:"whatsapp"},
+  {id:"moradores",l:"Moradores",i:"users"},
+];
+
+function App() {
+  const [user, setUser]      = useState(null);
+  const [page, setPage]      = useState("dashboard");
+  const [moradores, setMor]  = useState(MOCK_MORADORES);
+  const [encomendas, setEnc] = useState(DB_OK ? [] : MOCK_ENCOMENDAS);
+  const [logs, setLogs]      = useState(MOCK_LOGS);
+  const [users, setUsers] = useState(() => {
+    try {
+      const saved = localStorage.getItem("px_users");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Remove usuário porteiro de exemplo se existir
+        return parsed.filter(u => !(u.login === "porteiro" && u.nome === "Porteiro João"));
+      }
+      return USERS;
+    } catch { return USERS; }
+  });
+
+  // Salva users no localStorage sempre que mudar
+  useEffect(() => {
+    try { localStorage.setItem("px_users", JSON.stringify(users)); } catch {}
+  }, [users]);
+  const [sbOpen, setSbOpen]     = useState(false);
+  const [qmOpen, setQmOpen]     = useState(false);
+  const [quickEnc, setQuickEnc] = useState(false);
+  const addLog = useCallback(e => setLogs(p=>[...p,{...e,id:Date.now()}]), []);
+  const qmRef = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if(qmRef.current && !qmRef.current.contains(e.target)) setQmOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const navigate = (pg) => {
+    if(user && !canAccess(user.perfil, pg)) { setPage("dashboard"); return; }
+    setPage(pg);
+  };
+
+  // redirect if current page not allowed
+  useEffect(() => {
+    if(user && !canAccess(user.perfil, page)) setPage("dashboard");
+  }, [user, page]);
+
+  if(!user) return <><Styles/><Login onLogin={setUser} users={users}/>;</>
+  const m = META[page]||{};
+  const mobNav = ALL_MOB_NAV.filter(n => canAccess(user.perfil, n.id));
+  return (
+    <>
+      <Styles/>
+      <div className="app">
+        <Sidebar page={page} setPage={setPage} user={user} onLogout={()=>setUser(null)} open={sbOpen} onClose={()=>setSbOpen(false)}/>
+        <div className="main">
+          <div className="topbar">
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div className="qm-wrap" ref={qmRef}>
+                <button className="hbtn" onClick={()=>{setQmOpen(o=>!o);setSbOpen(false);}}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                </button>
+                {qmOpen && (
+                  <div className="qm">
+                    <div className="qm-title">Atalhos rápidos</div>
+                    <div className="qm-item" onClick={()=>{setQuickEnc(true);setQmOpen(false);}}>
+                      <div className="qm-icon" style={{background:"var(--ad)",color:"var(--ac)"}}><Icon n="plus"/></div>
+                      <div><div style={{fontWeight:600,color:"var(--t1)"}}>Nova Encomenda</div><div style={{fontSize:11,color:"var(--t3)"}}>Registrar pacote recebido</div></div>
+                    </div>
+                    <div className="qm-item" onClick={()=>{setPage("retirada");setQmOpen(false);}}>
+                      <div className="qm-icon" style={{background:"var(--gd)",color:"var(--gn)"}}><Icon n="check"/></div>
+                      <div><div style={{fontWeight:600,color:"var(--t1)"}}>Confirmar Retirada</div><div style={{fontSize:11,color:"var(--t3)"}}>Registrar retirada de pacote</div></div>
+                    </div>
+                    <div className="qm-sep"/>
+                    <div className="qm-item" onClick={()=>{setPage("notificacoes");setQmOpen(false);}}>
+                      <div className="qm-icon" style={{background:"var(--gd)",color:"var(--gn)"}}><Icon n="whatsapp"/></div>
+                      <div><div style={{fontWeight:600,color:"var(--t1)"}}>Notificações</div><div style={{fontSize:11,color:"var(--t3)"}}>Avisar moradores via WhatsApp</div></div>
+                    </div>
+                    <div className="qm-item" onClick={()=>{setPage("moradores");setQmOpen(false);}}>
+                      <div className="qm-icon" style={{background:"var(--bld)",color:"var(--bl)"}}><Icon n="users"/></div>
+                      <div><div style={{fontWeight:600,color:"var(--t1)"}}>Moradores</div><div style={{fontSize:11,color:"var(--t3)"}}>Ver lista de moradores</div></div>
+                    </div>
+                    <div className="qm-item" onClick={()=>{setPage("dashboard");setQmOpen(false);}}>
+                      <div className="qm-icon" style={{background:"#a78bfa22",color:"#a78bfa"}}><Icon n="dashboard"/></div>
+                      <div><div style={{fontWeight:600,color:"var(--t1)"}}>Dashboard</div><div style={{fontSize:11,color:"var(--t3)"}}>Voltar para o início</div></div>
+                    </div>
+                    {user.perfil==="admin" && <>
+                      <div className="qm-sep"/>
+                      <div className="qm-item" onClick={()=>{setPage("usuarios");setQmOpen(false);}}>
+                        <div className="qm-icon" style={{background:"var(--rdd)",color:"var(--rd)"}}><Icon n="key"/></div>
+                        <div><div style={{fontWeight:600,color:"var(--t1)"}}>Usuários</div><div style={{fontSize:11,color:"var(--t3)"}}>Gerenciar acessos</div></div>
+                      </div>
+                    </>}
+                    <div className="qm-sep"/>
+                    <div className="qm-item" onClick={()=>{setUser(null);setQmOpen(false);}}>
+                      <div className="qm-icon" style={{background:"var(--rdd)",color:"var(--rd)"}}><Icon n="logout"/></div>
+                      <div style={{color:"var(--rd)",fontWeight:600}}>Sair do sistema</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div><h2>{m.title}</h2><p>{m.desc}</p></div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <button className="hbtn" onClick={()=>{setSbOpen(o=>!o);setQmOpen(false);}}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+              </button>
+              <span style={{fontSize:12,color:"var(--t3)"}}>{new Date().toLocaleDateString("pt-BR",{day:"2-digit",month:"short",year:"numeric"})}</span>
+            </div>
+          </div>
+          <div className="pg">
+            {page==="dashboard"  && <Dashboard encomendas={encomendas} moradores={moradores}/>}
+            {page==="encomendas" && <Encomendas encomendas={encomendas} setEncomendas={setEnc} moradores={moradores} user={user} addLog={addLog}/>}
+            {page==="retirada"   && <Retirada encomendas={encomendas} setEncomendas={setEnc} user={user} addLog={addLog}/>}
+            {page==="moradores"  && <Moradores moradores={moradores} setMoradores={setMor} user={user}/>}
+            {page==="relatorios" && <Relatorios encomendas={encomendas} user={user}/>}
+            {page==="logs"       && <Logs logs={logs}/>}
+            {page==="notificacoes" && <Notificacoes encomendas={encomendas} moradores={moradores}/>}
+            {page==="usuarios"    && <Usuarios users={users} setUsers={setUsers} currentUser={user}/>}
+            {page==="configuracoes" && <Configuracoes/>}
+          </div>
+          {quickEnc && <NovaModal moradores={moradores} onSave={(enc)=>{setEnc(p=>[enc,...p]);addLog({acao:"Encomenda criada",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});setQuickEnc(false);}} onClose={()=>setQuickEnc(false)} user={user}/>}
+        </div>
+        <nav className="mob-nav">
+          <div className="mob-nav-inner">
+            {mobNav.map(n=>(
+              <div key={n.id} className={"mob-ni"+(page===n.id?" on":"")} onClick={()=>setPage(n.id)}>
+                <Icon n={n.i}/><span>{n.l}</span>
+              </div>
+            ))}
+          </div>
+        </nav>
+      </div>
+    </>
+  );
+}
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App/>);
+  </script>
+</body>
+</html>
