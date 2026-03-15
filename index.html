@@ -25,7 +25,7 @@ const DB_OK = !SUPABASE_URL.includes("COLE");
 // ─── IA CONFIG ────────────────────────────────────────────────────────────────
 // Suporta Anthropic (sk-ant-...) ou DeepSeek (sk-...)
 // Cole sua key aqui ou configure pela tela de Configurações no app
-const ANTHROPIC_KEY_CONFIG = "COLE_SUA_KEY_AQUI";
+const ANTHROPIC_KEY_CONFIG = "AIzaSyB0DhQ0Qc-vx1Cemd5MWaNzU2zWmdqHxb8";
 
 const getAnthropicKey = () => {
   if(!ANTHROPIC_KEY_CONFIG.includes("COLE")) return ANTHROPIC_KEY_CONFIG;
@@ -65,6 +65,30 @@ const db = {
     });
     const data = await r.json();
     return r.ok ? (Array.isArray(data) ? data[0] : data) : null;
+  },
+  async delete(table, id) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
+      method: "DELETE",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        Prefer: "return=representation"
+      }
+    });
+    return r.ok;
+  },
+  async deleteBatch(table, ids) {
+    if(!ids.length) return true;
+    const list = ids.join(",");
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=in.(${list})`, {
+      method: "DELETE",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        Prefer: "return=representation"
+      }
+    });
+    return r.ok;
   },
 };
 
@@ -1442,24 +1466,42 @@ const Encomendas = ({ encomendas, setEncomendas, moradores, user, addLog }) => {
     setShowModal(false); setPg(1);
   };
 
-  const excluirUm = (id) => {
+  const excluirUm = async (id) => {
     const enc = encomendas.find(e=>e.id===id);
     setEncomendas(p=>p.filter(e=>e.id!==id));
-    if(enc) addLog({acao:"Encomenda excluída",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});
     setDelId(null);
+    if(DB_OK && id && !String(id).startsWith("local_")) {
+      const ok = await db.delete("encomendas", id);
+      if(!ok) {
+        // Se falhou no banco, recarrega para manter consistência
+        dbSafe.getAll("encomendas").then(res => {
+          if(Array.isArray(res.data)) setEncomendas(res.data);
+        });
+        alert("⚠️ Erro ao excluir do banco.\nVerifique as permissões no Supabase (RLS).");
+        return;
+      }
+    }
+    try { const c=cache.load(); if(c) cache.save(c.data.filter(e=>e.id!==id)); } catch {}
+    if(enc) addLog({acao:"Encomenda excluída",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});
   };
 
-  const limparAntigas = () => {
-    const ids = new Set(elegiveis.map(e=>e.id));
-    setEncomendas(p=>p.filter(e=>!ids.has(e.id)));
+  const limparAntigas = async () => {
+    const ids = elegiveis.map(e=>e.id).filter(id=>!String(id).startsWith("local_"));
+    const localIds = new Set(elegiveis.map(e=>e.id));
+    setEncomendas(p=>p.filter(e=>!localIds.has(e.id)));
+    setShowLimp(false);
+    if(DB_OK && ids.length) await db.deleteBatch("encomendas", ids);
+    try { const c=cache.load(); if(c) cache.save(c.data.filter(e=>!localIds.has(e.id))); } catch {}
     addLog({acao:`Limpeza manual: ${elegiveis.length} removidas`,protocolo:"—",usuario:user.nome,data:new Date().toISOString()});
-    setShowLimp(false);
   };
 
-  const limparTodas = () => {
+  const limparTodas = async () => {
+    const ids = retiradas.map(e=>e.id).filter(id=>!String(id).startsWith("local_"));
     setEncomendas(p=>p.filter(e=>e.status!=="retirada"));
-    addLog({acao:`Limpeza total: ${retiradas.length} retiradas removidas`,protocolo:"—",usuario:user.nome,data:new Date().toISOString()});
     setShowLimp(false);
+    if(DB_OK && ids.length) await db.deleteBatch("encomendas", ids);
+    try { const c=cache.load(); if(c) cache.save(c.data.filter(e=>e.status!=="retirada")); } catch {}
+    addLog({acao:`Limpeza total: ${retiradas.length} retiradas removidas`,protocolo:"—",usuario:user.nome,data:new Date().toISOString()});
   };
 
   const retryOnline = () => {
