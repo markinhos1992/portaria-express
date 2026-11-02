@@ -913,6 +913,13 @@ const FotoCapture = ({ img, setImg, onOCR, loading }) => {
       <button className="btn bp blg" style={{width:"100%",justifyContent:"center",marginTop:4}} onClick={startCam}>
         📷 Ativar Câmera
       </button>
+      <label className="btn bs" style={{cursor:"pointer",width:"100%",justifyContent:"center"}}>
+        Escolher foto da etiqueta
+        <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{
+          const file=e.target.files?.[0];if(!file)return;
+          const reader=new FileReader();reader.onload=ev=>{setImg(ev.target.result);setMode("preview");onOCR(ev.target.result);};reader.readAsDataURL(file);
+        }}/>
+      </label>
     </div>
   );
 };
