@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
 import { normalizeWhatsAppPhone } from "./whatsapp.js";
+import { OCR_SCHEMA, matchResidentName } from "./ocr-schema.js";
 
 // A versão antiga guardava senhas em texto puro no navegador. Elas não são
 // usadas pela autenticação Supabase e são removidas no upgrade por segurança.
@@ -1074,6 +1075,7 @@ const NovaModal = ({ moradores, onSave, onClose, user }) => {
       const prompt = `Analise esta etiqueta de encomenda brasileira e extraia os dados do DESTINATÁRIO.
 Retorne SOMENTE este JSON sem markdown nem texto extra:
 {"nome":"","apartamento":"","bloco":"","telefone":"","rastreio":"","transportadora":"","remetente":""}
+Leia primeiro o nome completo do destinatário. Ele pode aparecer numa linha sem o título DESTINATÁRIO, acima do endereço. Copie o texto visível do nome, mesmo que contenha palavras de teste. Não confunda nome com endereço ou remetente.
 Campos: nome do destinatário, apartamento, bloco, telefone, código de rastreio (ex: BR123456789BR), transportadora (Correios/Jadlog/Loggi/Shopee/etc), remetente (Amazon/Shein/etc).
 Separe unidade e bloco: "BLOCO TESTE AP 999" significa bloco "TESTE" e apartamento "999". Rastreio deve conter apenas o código, sem a palavra RASTREIO. Se não visível deixe "". NÃO invente.`;
 
@@ -1087,7 +1089,7 @@ Separe unidade e bloco: "BLOCO TESTE AP 999" significa bloco "TESTE" e apartamen
         body:JSON.stringify({
           model:getOllamaModel(),
           messages:[{role:"user",content:prompt,images:[base64Data]}],
-          format:"json",
+          format:OCR_SCHEMA,
           think:false,
           stream:false,
           options:{temperature:0,num_ctx:2048,num_predict:400}
@@ -1130,6 +1132,19 @@ Separe unidade e bloco: "BLOCO TESTE AP 999" significa bloco "TESTE" e apartamen
       const unidade=p.bloco.match(/^(?:BLOCO\s+)?(.+?)\s+(?:AP|APTO|APARTAMENTO)\s*[:.-]?\s*(\w[\w-]*)$/i);
       if(unidade&&!p.apartamento){p.bloco=unidade[1].trim();p.apartamento=unidade[2];}
       p.rastreio=p.rastreio.replace(/^RASTREIO\s*[:.-]?\s*/i,"");
+      if(!p.nome&&p.bloco&&p.apartamento) {
+        try {
+          const transcription=await fetch(endpoint,{
+            method:"POST",headers:{"Content-Type":"application/json"},
+            signal:AbortSignal.any([controller.signal,AbortSignal.timeout(45_000)]),
+            body:JSON.stringify({model:getOllamaModel(),messages:[{role:"user",content:"Transcreva literalmente todas as linhas de texto visíveis nesta imagem, de cima para baixo. Inclua nomes e palavras de teste. Não interprete, não resuma, não descarte linhas.",images:[base64Data]}],think:false,stream:false,options:{temperature:0,num_ctx:2048,num_predict:200}})
+          });
+          if(transcription.ok) {
+            const transcribed=await transcription.json();
+            p.nome=matchResidentName(transcribed.message?.content||"",moradores,p);
+          }
+        } catch { /* A revisão mantém os dados já lidos se a segunda leitura falhar. */ }
+      }
       setOcr(p);
       setForm(f=>({...f,...p,morador:p.nome||f.morador}));
       const sg = moradores.filter(m=>m.ativo).map(m=>{
