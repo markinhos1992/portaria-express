@@ -59,7 +59,7 @@ echo ⚠️  O GitHub vai pedir seu login no navegador.
 echo     Faça login quando abrir a janela!
 echo.
 
-git add .
+git add index.html README.md package.json package-lock.json vite.config.js .gitignore .github src supabase docs atualizar.bat configurar_primeira_vez.bat
 git commit -m "Configuração inicial — Portaria Express"
 git push -u origin main
 

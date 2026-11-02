@@ -1,76 +1,60 @@
-# 📦 Portaria Express
+# Portaria Express
 
-Sistema inteligente de gestão de encomendas para condomínios.
+Aplicação web para registrar encomendas de condomínios, acompanhar retiradas e organizar avisos aos moradores. O projeto está em preparação para pilotos comerciais; a cobrança, o suporte e algumas rotinas de operação ainda precisam ser definidos.
 
-## 🌐 Acesso Online
+## Recursos
 
-Após configurar o GitHub Pages, o sistema estará disponível em:  
-`https://SEU_USUARIO.github.io/portaria-express`
+- Cadastro e pesquisa de encomendas e moradores.
+- Confirmação de retirada com foto privada armazenada no Supabase Storage.
+- Contas por e-mail, recuperação de senha, condomínios separados e convites para a equipe.
+- Perfis de administrador e porteiro, com políticas de acesso no banco.
+- Atualização em tempo real de novos registros e alterações, filtrada pelo condomínio ativo.
+- Importação de moradores por CSV e exportação de relatórios.
+- Mensagem de WhatsApp preparada para envio manual pela equipe.
+- Leitura assistida de etiquetas com Ollama/Qwen 3.5 quando o serviço local estiver disponível.
+- Arquivamento de encomendas sem exclusão automática do histórico.
 
----
+## Configuração necessária antes do primeiro uso
 
-## 🚀 Como publicar no GitHub Pages (passo a passo)
+O código exige Supabase Auth e as tabelas protegidas da migração. A tela de login não possui usuário ou senha de demonstração.
 
-### 1. Criar conta no GitHub
-- Acesse [github.com](https://github.com) e crie uma conta gratuita
+No projeto Supabase conectado ao aplicativo, a migração foi aplicada em 2 de novembro de 2026 e os endereços de retorno do GitHub Pages e do ambiente local foram cadastrados. Para configurar outro projeto, abra **SQL Editor** e aplique [`supabase/migrations/202611010001_comercial_seguro.sql`](supabase/migrations/202611010001_comercial_seguro.sql); depois, em **Authentication → URL Configuration**, cadastre as URLs exatas de teste e produção.
 
-### 2. Criar repositório
-- Clique no botão **"New"** (ou **"+"** no canto superior direito)
-- Nome do repositório: `portaria-express`
-- Deixe como **Public**
-- Clique em **"Create repository"**
+1. Confirme a configuração de confirmação de e-mail e use o fluxo **Criar conta** para registrar a primeira pessoa administradora.
+2. Faça um teste de isolamento com duas contas e dois condomínios: cada conta deve ver apenas os registros do próprio condomínio.
+3. Para adicionar a equipe, gere um convite na seção **Usuários**; a pessoa deverá criar conta com o e-mail convidado e aceitar o código.
+4. Confirme que o projeto usa o endereço e a chave **publishable** definidos no início de `src/main.jsx`. Chave publishable pode ficar no navegador; nunca coloque chave `secret` ou `service_role` no site.
+5. Publique o site em HTTPS depois de concluir os testes de isolamento e as demais verificações do checklist do piloto.
 
-### 3. Fazer upload dos arquivos
-- Na página do repositório, clique em **"uploading an existing file"**
-- Arraste os arquivos `index.html` e `README.md`
-- Clique em **"Commit changes"**
+### Dados da versão antiga
 
-### 4. Ativar GitHub Pages
-- Vá em **Settings** (aba no topo do repositório)
-- No menu lateral, clique em **Pages**
-- Em **Source**, selecione **"Deploy from a branch"**
-- Em **Branch**, selecione **"main"** e pasta **"/ (root)"**
-- Clique em **Save**
+A versão anterior guardava contas no navegador e usava uma tabela de encomendas sem separação por condomínio. A nova versão remove automaticamente a lista antiga de contas e senhas locais por segurança; cada pessoa deverá criar uma conta Supabase. A migração mantém as tabelas antigas intactas e não copia dados automaticamente. Antes de migrar registros existentes, exporte moradores e encomendas, confirme a qual condomínio pertencem e faça uma cópia de segurança. Não misture dados de clientes diferentes.
 
-### 5. Acessar o site
-- Aguarde ~2 minutos
-- Acesse: `https://SEU_USUARIO.github.io/portaria-express`
+### Ollama local
 
----
+O modelo padrão é `qwen3.5:4b`. Instale [Ollama](https://ollama.com/download) em cada computador que fará leitura de etiquetas e execute `ollama run qwen3.5:4b`. Se o site for aberto pelo endereço público, permita no Ollama a origem HTTPS exata do site. Cada instalação usa CPU/GPU, memória, espaço e energia desse computador. O modo local não oferece uma IA hospedada para todos os clientes.
 
-## 🔑 Login padrão
+Com Ollama, as imagens de etiqueta são analisadas localmente. A foto da retirada é enviada ao bucket privado do Supabase do condomínio e seu prazo de retenção deve ser definido e informado pelo operador do sistema.
 
-| Usuário | Senha  | Perfil |
-|---------|--------|--------|
-| admin   | 123456 | Admin  |
+## Segurança e privacidade
 
-> ⚠️ **Importante:** Altere a senha do admin após o primeiro acesso em **Usuários**.
+- As tabelas `portaria_*` usam Supabase Auth e Row Level Security (RLS) para separar os registros por condomínio.
+- A migração habilita atualizações em tempo real para encomendas, moradores e auditoria. A tela também sincroniza ao voltar para o navegador e oferece atualização manual; eventos de exclusão não são transmitidos.
+- A chave publishable é pública por natureza; a proteção depende das políticas RLS. Nunca use `service_role` no navegador.
+- Fotos de retirada usam bucket privado e política de acesso por condomínio. Os registros de encomendas são arquivados, não apagados automaticamente.
+- O condomínio precisa definir finalidade, prazo de retenção, responsáveis, avisos de privacidade e procedimento para solicitações dos titulares.
+- A migração foi aplicada manualmente ao projeto Supabase conectado; o SQL não é executado automaticamente pelo site. Os testes com contas separadas e condomínio de homologação ainda são necessários antes do uso comercial.
 
----
+Consulte [`docs/privacidade-e-operacao.md`](docs/privacidade-e-operacao.md) para a lista de decisões necessárias. O documento é um roteiro operacional e não substitui revisão jurídica.
 
-## ⚙️ Configurar API Key (leitura de etiqueta com IA)
+## Piloto e comercialização
 
-1. Acesse [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-2. Crie uma API Key gratuita do Gemini
-3. No sistema, vá em **⚙️ Configurações**
-4. Cole a key (começa com `AIza...`) e salve
+Comece com dois ou três condomínios por 30 dias. Acompanhe tempo de cadastro, avisos efetivamente enviados, retiradas registradas, falhas, treinamento e suporte necessário. Combine por escrito quais dados serão usados e como serão removidos ao encerrar o piloto. Valide disposição de pagamento e custo de suporte antes de anunciar preços.
 
----
+Planos pagos, cobrança recorrente, emissão fiscal e atendimento com prazo garantido ainda não estão implementados.
 
-## 🗄️ Banco de dados (Supabase)
+## Publicação
 
-O sistema usa o Supabase como banco de dados em nuvem.  
-As credenciais já estão configuradas no arquivo `index.html`.
+O workflow em `.github/workflows/deploy-pages.yml` compila e publica a pasta `dist`. Na primeira configuração, abra **Settings → Pages** no GitHub e selecione **GitHub Actions** como fonte. Uma publicação só deve ser feita depois de aplicar e testar a migração do Supabase, configurar os URLs de autenticação, revogar credenciais antigas expostas e remover a cópia do segredo do histórico público do Git. Um commit novo, sozinho, não apaga o segredo dos commits antigos; reescrever o histórico exige coordenar um envio forçado da branch.
 
----
-
-## 📱 Funcionalidades
-
-- ✅ Registro de encomendas com câmera e leitura por IA
-- ✅ Confirmação de retirada com foto
-- ✅ Notificação via WhatsApp
-- ✅ Cadastro de moradores
-- ✅ Relatórios e exportação CSV
-- ✅ Limpeza automática de registros antigos (15 dias)
-- ✅ Modo offline com cache local
-- ✅ Controle de acesso (Admin / Porteiro)
+O arquivo `atualizar.bat` é um atalho legado para envio direto à branch principal. Antes de usá-lo, revise os arquivos que serão publicados e confirme que o segredo antigo foi revogado.
