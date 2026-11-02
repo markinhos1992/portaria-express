@@ -926,6 +926,8 @@ const FotoCapture = ({ img, setImg, onOCR, loading }) => {
 
 // ─── NOVA ENCOMENDA ───────────────────────────────────────────────────────────
 const NovaModal = ({ moradores, onSave, onClose, user }) => {
+  const ocrRequestRef=useRef(null);
+  useEffect(()=>()=>ocrRequestRef.current?.abort(),[]);
   const [step, setStep] = useState(1);
   const [inputMode, setInputMode] = useState("manual"); // foto | scanner | manual
   const [img, setImg] = useState(null);
@@ -1061,6 +1063,8 @@ const NovaModal = ({ moradores, onSave, onClose, user }) => {
   const runOCR = async (imageInput=img) => {
     if(!imageInput) return alert("Tire ou envie uma foto da etiqueta antes de ler com IA.");
 
+    if(loading)return;
+    const controller=new AbortController();ocrRequestRef.current=controller;
     setLoading(true);
     try {
       // A imagem é processada pelo Ollama no próprio computador.
@@ -1074,10 +1078,12 @@ Campos: nome do destinatário, apartamento, bloco, telefone, código de rastreio
 Separe unidade e bloco: "BLOCO TESTE AP 999" significa bloco "TESTE" e apartamento "999". Rastreio deve conter apenas o código, sem a palavra RASTREIO. Se não visível deixe "". NÃO invente.`;
 
       const endpoint = getOllamaUrl().replace(/\/+$/, "") + "/api/chat";
+      const probe = await fetch(getOllamaUrl().replace(/\/+$/, "") + "/api/tags", {signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10_000)])});
+      if(!probe.ok) throw new Error(probe.status===403?"ORIGIN_BLOCKED":"Ollama respondeu HTTP "+probe.status);
       const res = await fetch(endpoint, {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        signal:AbortSignal.timeout(180_000),
+        signal:AbortSignal.any([controller.signal,AbortSignal.timeout(90_000)]),
         body:JSON.stringify({
           model:getOllamaModel(),
           messages:[{role:"user",content:prompt,images:[base64Data]}],
@@ -1118,6 +1124,12 @@ Separe unidade e bloco: "BLOCO TESTE AP 999" significa bloco "TESTE" e apartamen
         if(!p.nome) throw new Error("Não foi possível extrair dados da etiqueta. Resposta: " + clean.slice(0,120));
       }
 
+      if(!p||typeof p!=="object"||Array.isArray(p)) throw new Error("Resposta inválida da IA. Tente outra foto.");
+      p=Object.fromEntries(["nome","apartamento","bloco","telefone","rastreio","transportadora","remetente"].map(key=>[key,typeof p[key]==="string"?p[key].trim():""]));
+      if(!Object.values(p).some(Boolean)) throw new Error("A IA não identificou dados na etiqueta. Tente uma foto mais nítida.");
+      const unidade=p.bloco.match(/^(?:BLOCO\s+)?(.+?)\s+(?:AP|APTO|APARTAMENTO)\s*[:.-]?\s*(\w[\w-]*)$/i);
+      if(unidade&&!p.apartamento){p.bloco=unidade[1].trim();p.apartamento=unidade[2];}
+      p.rastreio=p.rastreio.replace(/^RASTREIO\s*[:.-]?\s*/i,"");
       setOcr(p);
       setForm(f=>({...f,...p,morador:p.nome||f.morador}));
       const sg = moradores.filter(m=>m.ativo).map(m=>{
@@ -1131,12 +1143,17 @@ Separe unidade e bloco: "BLOCO TESTE AP 999" significa bloco "TESTE" e apartamen
       setStep(2);
 
     } catch(err) {
+      if(controller.signal.aborted)return;
       console.error("OCR error:", err);
       const msg = err.message || "";
-      if(msg.includes("Failed to fetch")||msg.includes("NetworkError")||msg.includes("fetch")||msg.includes("CORS")) {
+      if(msg.includes("ORIGIN_BLOCKED")||msg.includes("403")) {
+        alert("O Ollama bloqueou o endereço deste site. Configure OLLAMA_ORIGINS=https://markinhos1992.github.io no Windows e reinicie o Ollama. Depois use Testar conexão em Configurações.");
+      } else if(msg.includes("allocate")||msg.includes("memory")||msg.includes("load model")) {
+        alert("Memória insuficiente para carregar o modelo. Use qwen3.5:2b em Configurações e feche aplicativos que consomem muita memória.");
+      } else if(msg.includes("Failed to fetch")||msg.includes("NetworkError")||msg.includes("fetch")||msg.includes("CORS")) {
         alert("❌ Não consegui conectar ao Ollama.\n\nAbra o Ollama neste computador e instale o modelo qwen3.5:2b. Depois, tente novamente. Se o site estiver publicado, ele ainda precisa estar aberto neste mesmo computador e o Ollama precisa permitir a origem do site.");
       } else if(err.name==="TimeoutError"||err.name==="AbortError") {
-        alert("⌛ A leitura demorou mais de 3 minutos e foi interrompida. Confira se o Ollama está respondendo, se o computador tem memória suficiente e se o modelo escolhido é adequado para este aparelho.");
+        alert("⌛ A conexão ou a leitura excedeu o tempo limite e foi interrompida. Confira se o Ollama está respondendo, se o computador tem memória suficiente e se o modelo escolhido é adequado para este aparelho.");
       } else if(msg.includes("not found")||msg.includes("pull model")||msg.includes("model")) {
         alert("❌ Modelo não encontrado no Ollama. Instale o qwen3.5:2b e tente de novo.\n\n" + msg);
       } else {
@@ -1939,6 +1956,7 @@ const Logs = ({ logs }) => (
 
 // ─── CONFIGURAÇÕES ────────────────────────────────────────────────────────────
 const Configuracoes = () => {
+  const [connectionStatus,setConnectionStatus]=useState("");
   const [ollamaModel, setOllamaModel] = useState(getOllamaModel);
   const [ollamaUrl, setOllamaUrl] = useState(getOllamaUrl);
   const [saved, setSaved] = useState(false);
@@ -1997,6 +2015,18 @@ const Configuracoes = () => {
             As fotos da etiqueta são enviadas ao serviço Ollama configurado; use um endereço local e confiável.
           </div>
           <button className="btn bp" onClick={salvar}>{saved?"✅ Configuração salva":"💾 Salvar configuração"}</button>
+          <button className="btn bs" disabled={connectionStatus==="Testando…"} onClick={async()=>{
+            setConnectionStatus("Testando…");
+            try {
+              const response=await fetch(ollamaUrl.trim().replace(/\/+$/,"")+"/api/tags",{signal:AbortSignal.timeout(10_000)});
+              if(!response.ok)throw new Error(response.status===403?"Ollama bloqueou a origem do site. Configure OLLAMA_ORIGINS e reinicie o Ollama.":"HTTP "+response.status);
+              const data=await response.json();
+              const installed=(data.models||[]).some(m=>m.name===ollamaModel.trim()||m.model===ollamaModel.trim());
+              setConnectionStatus(installed?"Conexão OK. Modelo instalado. Faça uma leitura de teste para validar a foto.":"Conexão OK, mas o modelo escolhido não está instalado.");
+            } catch(e) {setConnectionStatus(e.name==="TimeoutError"?"Ollama não respondeu em 10 segundos. Confira o endereço e o acesso à rede local.":"Falha de conexão: "+e.message+" Confira OLLAMA_ORIGINS e a permissão de acesso à rede local do navegador.");}
+          }}>Testar conexão</button>
+          {connectionStatus&&<p role="status" style={{marginTop:12}}>{connectionStatus}</p>}
+
         </div>
       </div>
     </div>
