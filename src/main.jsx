@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
+import { normalizeWhatsAppPhone } from "./whatsapp.js";
 
 // A versão antiga guardava senhas em texto puro no navegador. Elas não são
 // usadas pela autenticação Supabase e são removidas no upgrade por segurança.
@@ -34,7 +35,6 @@ const db = {
     const target=TENANT_TABLES[table]||table;
     const orderColumn=table==="logs"?"data":"criado_em";
     let query=supabaseClient.from(target).select("*").eq("condominio_id",ACTIVE_TENANT_ID);
-    if(table==="encomendas")query=query.is("arquivado_em",null);
     const {data,error}=await query.order(orderColumn,{ascending:false});
     if(error) throw error;
     return data||[];
@@ -1153,7 +1153,7 @@ Se não visível deixe "". NÃO invente.`;
   };
 
   const waMsg = saved?encodeURIComponent(`Olá, ${saved.morador}. Sua encomenda foi recebida na portaria do condomínio. Protocolo: ${saved.protocolo}.`):"";
-  const waPhone = saved?.telefone?.replace(/\D/g,"");
+  const waPhone = normalizeWhatsAppPhone(saved?.telefone);
 
   return (
     <div className="ov" onClick={onClose}>
@@ -1373,7 +1373,7 @@ Se não visível deixe "". NÃO invente.`;
           {step===2&&(
             <>
               {loading&&<div className="scan-result"><span className="spin"/> Lendo a etiqueta e preenchendo os dados…</div>}
-              {!loading&&!ocr&&form.rastreio&&<div style={{background:"var(--bld)",border:"1px solid #3b82f633",borderRadius:"var(--rs)",padding:12,marginBottom:14,fontSize:12,color:"var(--t2)",lineHeight:1.6}}>O código de barras trouxe o rastreio. Para preencher também morador, unidade e remetente, fotografe a etiqueta inteira com a leitura por IA.</div>}
+              {!loading&&!ocr&&scanResult&&form.rastreio&&<div style={{background:"var(--bld)",border:"1px solid #3b82f633",borderRadius:"var(--rs)",padding:12,marginBottom:14,fontSize:12,color:"var(--t2)",lineHeight:1.6}}>O código de barras trouxe o rastreio. Para preencher também morador, unidade e remetente, fotografe a etiqueta inteira com a leitura por IA.</div>}
               {ocr&&(
                 <div className="ocr">
                   <p style={{fontSize:11,color:"var(--t3)",marginBottom:8,fontWeight:600}}>✓ DADOS EXTRAÍDOS PELA IA — confirme ou corrija:</p>
@@ -1419,7 +1419,7 @@ Se não visível deixe "". NÃO invente.`;
                 <p>📱 Mensagem pronta para WhatsApp:</p>
                 <code>Olá, {saved.morador}. Sua encomenda foi recebida na portaria. Protocolo: {saved.protocolo}.</code>
                 <div style={{display:"flex",gap:10}}>
-                  {waPhone&&<a href={`https://wa.me/55${waPhone}?text=${waMsg}`} target="_blank" rel="noreferrer" className="btn bgr" style={{flex:1,justifyContent:"center",textDecoration:"none"}}>
+                  {waPhone&&<a href={`https://wa.me/${waPhone}?text=${waMsg}`} target="_blank" rel="noreferrer" className="btn bgr" style={{flex:1,justifyContent:"center",textDecoration:"none"}}>
                     <Icon n="whatsapp"/> Abrir WhatsApp
                   </a>}
                   <button className="btn bg2" style={{flex:1}} onClick={onClose}>Fechar</button>
@@ -1515,7 +1515,7 @@ const Encomendas = ({ encomendas, setEncomendas, moradores, user, addLog }) => {
     if(!enc)return;
     try {
       await db.delete("encomendas",id);
-      setEncomendas(p=>p.filter(e=>e.id!==id));setDelId(null);
+      setEncomendas(p=>p.map(e=>e.id===id?{...e,arquivado_em:new Date().toISOString()}:e));setDelId(null);
       await addLog({acao:"Encomenda arquivada",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});
     } catch(e) { alert("Não foi possível arquivar. O registro foi mantido na lista.\n\n"+(e.message||"Verifique a conexão e as permissões.")); }
   };
@@ -1524,7 +1524,7 @@ const Encomendas = ({ encomendas, setEncomendas, moradores, user, addLog }) => {
     const ids=elegiveis.map(e=>e.id);
     try {
       await db.deleteBatch("encomendas",ids);
-      setEncomendas(p=>p.filter(e=>!new Set(ids).has(e.id)));setShowLimp(false);
+      setEncomendas(p=>p.map(e=>ids.includes(e.id)?{...e,arquivado_em:new Date().toISOString()}:e));setShowLimp(false);
       await addLog({acao:`Encomendas arquivadas: ${elegiveis.length}`,protocolo:"—",usuario:user.nome,data:new Date().toISOString()});
     } catch(e) { alert("O arquivamento falhou e os registros foram mantidos.\n\n"+(e.message||"Verifique sua conexão.")); }
   };
@@ -1533,7 +1533,7 @@ const Encomendas = ({ encomendas, setEncomendas, moradores, user, addLog }) => {
     const ids=retiradas.map(e=>e.id);
     try {
       await db.deleteBatch("encomendas",ids);
-      setEncomendas(p=>p.filter(e=>e.status!=="retirada"));setShowLimp(false);
+      setEncomendas(p=>p.map(e=>ids.includes(e.id)?{...e,arquivado_em:new Date().toISOString()}:e));setShowLimp(false);
       await addLog({acao:`Encomendas arquivadas: ${retiradas.length}`,protocolo:"—",usuario:user.nome,data:new Date().toISOString()});
     } catch(e) { alert("O arquivamento falhou e os registros foram mantidos.\n\n"+(e.message||"Verifique sua conexão.")); }
   };
@@ -1871,8 +1871,8 @@ const Relatorios = ({ encomendas, user }) => {
       </div>
       <div className="card">
         <div className="ch">
-          <div><h3>Histórico</h3><p>{list.length} registros</p></div>
-          {!readonly && <button className="btn bs" onClick={()=>doExport(list.map(e=>({Protocolo:e.protocolo,Morador:e.morador,Bloco:e.bloco,Ap:e.apartamento,Transportadora:e.transportadora||"",Status:e.status,Recebida:fmtDate(e.criado_em),Retirada:fmtDate(e.retirado_em)})),"relatorio.csv")}>
+          <div><h3>Histórico</h3><p>{list.length} registros · inclui arquivadas</p></div>
+          {!readonly && <button className="btn bs" onClick={()=>doExport(list.map(e=>({Protocolo:e.protocolo,Morador:e.morador,Bloco:e.bloco,Ap:e.apartamento,Transportadora:e.transportadora||"",Status:e.status,Arquivada:e.arquivado_em?"Sim":"Não",Recebida:fmtDate(e.criado_em),Retirada:fmtDate(e.retirado_em)})),"relatorio.csv")}>
             <Icon n="download"/> Exportar CSV
           </button>}
         </div>
@@ -1883,7 +1883,7 @@ const Relatorios = ({ encomendas, user }) => {
             {list.map(e=>(
               <tr key={e.id}>
                 <td><code style={{fontSize:11,color:"var(--t3)"}}>{e.protocolo}</code></td>
-                <td><strong>{e.morador}</strong></td>
+                <td><strong>{e.morador}</strong>{e.arquivado_em&&<><br/><span className="badge bb">Arquivada</span></>}</td>
                 <td>Bl {e.bloco}/Ap {e.apartamento}</td>
                 <td>{e.transportadora||"—"}</td>
                 <td><span className={`badge ${e.status==="pendente"?"by":"bg"}`}>{e.status==="pendente"?"⏳ Pendente":"✓ Retirada"}</span></td>
@@ -2068,7 +2068,8 @@ _Portaria Express_`;
     const mor = getMorador(enc);
     const tel = mor?.whatsapp || mor?.telefone || enc.telefone;
     if(!tel) return alert("Morador sem telefone cadastrado. Adicione o telefone na aba Moradores.");
-    const num = "55" + tel.replace(/\D/g,"");
+    const num = normalizeWhatsAppPhone(tel);
+    if(!num) return alert("Telefone inválido. Informe DDD e número, com ou sem +55.");
     const msg = encodeURIComponent(msgOverride || msgPadrao(enc));
     window.open(`https://wa.me/${num}?text=${msg}`, "_blank");
     setEnviados(p=>({...p,[enc.id]:true}));
@@ -2098,7 +2099,7 @@ _Portaria Express_`;
       <div style={{display:"flex",flexDirection:"column",gap:12}}>
         {pendentes.map(enc => {
           const mor = getMorador(enc);
-          const temTel = !!(mor?.whatsapp || mor?.telefone || enc.telefone);
+          const temTel = !!normalizeWhatsAppPhone(mor?.whatsapp || mor?.telefone || enc.telefone);
           const jaEnviou = enviados[enc.id];
           const diasEsp = Math.floor((Date.now()-new Date(enc.criado_em))/86400000);
           return (
@@ -2107,7 +2108,7 @@ _Portaria Express_`;
                 <div style={{flex:1}}>
                   <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
                     <strong style={{fontSize:14}}>{enc.morador}</strong>
-                    {jaEnviou && <span className="badge bg">✓ Notificado</span>}
+                    {jaEnviou && <span className="badge bg">WhatsApp aberto — confirme o envio</span>}
                     {diasEsp>=3 && !jaEnviou && <span className="badge br">⚠️ {diasEsp}d esperando</span>}
                     {diasEsp<3 && !jaEnviou && <span className="badge by">{diasEsp===0?"Hoje":`${diasEsp}d`}</span>}
                   </div>
@@ -2308,7 +2309,7 @@ function App() {
       const [condoResult,residentsResult,packagesResult,logsResult]=await Promise.all([
         Promise.resolve({data:{id:member.condominio_id,nome:member.nome_condominio},error:null}),
         supabaseClient.from("portaria_moradores").select("*").eq("condominio_id",member.condominio_id).order("nome"),
-        supabaseClient.from("portaria_encomendas").select("*").eq("condominio_id",member.condominio_id).is("arquivado_em",null).order("criado_em",{ascending:false}),
+        supabaseClient.from("portaria_encomendas").select("*").eq("condominio_id",member.condominio_id).order("criado_em",{ascending:false}),
         supabaseClient.from("portaria_auditoria").select("*").eq("condominio_id",member.condominio_id).order("data",{ascending:false}).limit(1000)
       ]);
       if(requestId!==loadRequestRef.current)return;
@@ -2415,13 +2416,13 @@ function App() {
       </div>
       {dataError&&<div role="alert" className="offbanner" style={{margin:"12px 24px 0"}}><strong>Problema de sincronização:</strong> {dataError}<button className="btn bs bsm" style={{marginLeft:10}} onClick={()=>loadTenant(session)}>Tentar novamente</button></div>}
       <div className="pg">
-        {page==="dashboard"&&<Dashboard encomendas={encomendas} moradores={moradores}/>}
-        {page==="encomendas"&&<Encomendas encomendas={encomendas} setEncomendas={setEnc} moradores={moradores} user={user} addLog={addLog}/>}
-        {page==="retirada"&&<Retirada encomendas={encomendas} setEncomendas={setEnc} user={user} addLog={addLog}/>}
+        {page==="dashboard"&&<Dashboard encomendas={encomendas.filter(e=>!e.arquivado_em)} moradores={moradores}/>}
+        {page==="encomendas"&&<Encomendas encomendas={encomendas.filter(e=>!e.arquivado_em)} setEncomendas={setEnc} moradores={moradores} user={user} addLog={addLog}/>}
+        {page==="retirada"&&<Retirada encomendas={encomendas.filter(e=>!e.arquivado_em)} setEncomendas={setEnc} user={user} addLog={addLog}/>}
         {page==="moradores"&&<Moradores moradores={moradores} setMoradores={setMor} user={user}/>}
         {page==="relatorios"&&<Relatorios encomendas={encomendas} user={user}/>}
         {page==="logs"&&<Logs logs={logs}/>}
-        {page==="notificacoes"&&<Notificacoes encomendas={encomendas} moradores={moradores}/>}
+        {page==="notificacoes"&&<Notificacoes encomendas={encomendas.filter(e=>!e.arquivado_em)} moradores={moradores}/>}
         {page==="xwriter"&&<XWriter/>}
         {page==="usuarios"&&<Usuarios condominioId={user.condominio_id} currentUserId={session.user.id}/>}
         {page==="configuracoes"&&<Configuracoes/>}
