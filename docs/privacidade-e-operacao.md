@@ -40,7 +40,7 @@ O aplicativo arquiva encomendas sem apagar automaticamente. A migração cria re
 
 ## Checklist do piloto
 
-- A migração foi aplicada manualmente ao projeto Supabase conectado em 2 de novembro de 2026. Antes do piloto comercial, validar RLS em homologação com duas contas de condomínios diferentes.
+- A migração foi aplicada manualmente ao projeto Supabase conectado em 2 de novembro de 2026. O teste de RLS com dois usuários e condomínios sintéticos passou em uma transação revertida; antes do piloto comercial, validar também cadastro, login, convites e acesso a fotos com contas reais.
 - Remover contas de porteiros que deixaram a equipe e verificar que perdem acesso.
 - Confirmar que usuários comuns não conseguem alterar cadastro de moradores nem consultar outra empresa/condomínio.
 - Verificar acesso a fotos: sem sessão não pode abrir; outra conta de condomínio não pode criar URL ou ler a imagem.

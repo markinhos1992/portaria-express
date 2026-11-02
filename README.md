@@ -18,10 +18,10 @@ Aplicação web para registrar encomendas de condomínios, acompanhar retiradas 
 
 O código exige Supabase Auth e as tabelas protegidas da migração. A tela de login não possui usuário ou senha de demonstração.
 
-No projeto Supabase conectado ao aplicativo, a migração foi aplicada em 2 de novembro de 2026 e os endereços de retorno do GitHub Pages e do ambiente local foram cadastrados. Para configurar outro projeto, abra **SQL Editor** e aplique [`supabase/migrations/202611010001_comercial_seguro.sql`](supabase/migrations/202611010001_comercial_seguro.sql); depois, em **Authentication → URL Configuration**, cadastre as URLs exatas de teste e produção.
+No projeto Supabase conectado ao aplicativo, a migração foi aplicada em 2 de novembro de 2026 e os endereços de retorno do GitHub Pages e do ambiente local foram cadastrados. O teste de isolamento no banco passou com dois usuários e condomínios sintéticos; a transação foi revertida e não deixou dados de teste. Para configurar outro projeto, abra **SQL Editor** e aplique [`supabase/migrations/202611010001_comercial_seguro.sql`](supabase/migrations/202611010001_comercial_seguro.sql); depois, em **Authentication → URL Configuration**, cadastre as URLs exatas de teste e produção.
 
 1. Confirme a configuração de confirmação de e-mail e use o fluxo **Criar conta** para registrar a primeira pessoa administradora.
-2. Faça um teste de isolamento com duas contas e dois condomínios: cada conta deve ver apenas os registros do próprio condomínio.
+2. Valide cadastro, confirmação de e-mail, login, recuperação de senha e convite com contas reais antes de cadastrar moradores.
 3. Para adicionar a equipe, gere um convite na seção **Usuários**; a pessoa deverá criar conta com o e-mail convidado e aceitar o código.
 4. Confirme que o projeto usa o endereço e a chave **publishable** definidos no início de `src/main.jsx`. Chave publishable pode ficar no navegador; nunca coloque chave `secret` ou `service_role` no site.
 5. Publique o site em HTTPS depois de concluir os testes de isolamento e as demais verificações do checklist do piloto.
@@ -43,7 +43,7 @@ Com Ollama, as imagens de etiqueta são analisadas localmente. A foto da retirad
 - A chave publishable é pública por natureza; a proteção depende das políticas RLS. Nunca use `service_role` no navegador.
 - Fotos de retirada usam bucket privado e política de acesso por condomínio. Os registros de encomendas são arquivados, não apagados automaticamente.
 - O condomínio precisa definir finalidade, prazo de retenção, responsáveis, avisos de privacidade e procedimento para solicitações dos titulares.
-- A migração foi aplicada manualmente ao projeto Supabase conectado; o SQL não é executado automaticamente pelo site. Os testes com contas separadas e condomínio de homologação ainda são necessários antes do uso comercial.
+- A migração foi aplicada manualmente ao projeto Supabase conectado; o SQL não é executado automaticamente pelo site. O teste de RLS com usuários sintéticos passou; o fluxo real de autenticação e os convites ainda precisam ser verificados antes do uso comercial.
 
 Consulte [`docs/privacidade-e-operacao.md`](docs/privacidade-e-operacao.md) para a lista de decisões necessárias. O documento é um roteiro operacional e não substitui revisão jurídica.
 
@@ -55,6 +55,6 @@ Planos pagos, cobrança recorrente, emissão fiscal e atendimento com prazo gara
 
 ## Publicação
 
-O workflow em `.github/workflows/deploy-pages.yml` compila e publica a pasta `dist`. Na primeira configuração, abra **Settings → Pages** no GitHub e selecione **GitHub Actions** como fonte. Uma publicação só deve ser feita depois de aplicar e testar a migração do Supabase, configurar os URLs de autenticação, revogar credenciais antigas expostas e remover a cópia do segredo do histórico público do Git. Um commit novo, sozinho, não apaga o segredo dos commits antigos; reescrever o histórico exige coordenar um envio forçado da branch.
+O workflow em `.github/workflows/deploy-pages.yml` compila e publica a pasta `dist`. Na primeira configuração, abra **Settings → Pages** no GitHub e selecione **GitHub Actions** como fonte. Antes da publicação, valide o fluxo real de autenticação, confirme que a chave antiga foi removida de todo o histórico público e conclua as verificações do piloto. A chave foi revogada; um commit novo, sozinho, não apaga o segredo dos commits antigos, então o histórico ainda precisa ser reescrito.
 
 O arquivo `atualizar.bat` é um atalho legado para envio direto à branch principal. Antes de usá-lo, revise os arquivos que serão publicados e confirme que o segredo antigo foi revogado.
