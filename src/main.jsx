@@ -22,7 +22,7 @@ const TENANT_TABLES = {encomendas:"portaria_encomendas",moradores:"portaria_mora
 
 // A leitura de etiquetas usa Ollama local e não exige chave de API.
 const getOllamaModel = () => {
-  try { return localStorage.getItem("px_ollama_model") || "qwen3.5:4b"; } catch { return "qwen3.5:4b"; }
+  try { return localStorage.getItem("px_ollama_model") || "qwen3.5:2b"; } catch { return "qwen3.5:2b"; }
 };
 const getOllamaUrl = () => {
   try { return localStorage.getItem("px_ollama_url") || "http://localhost:11434"; } catch { return "http://localhost:11434"; }
@@ -1064,7 +1064,7 @@ const NovaModal = ({ moradores, onSave, onClose, user }) => {
 Retorne SOMENTE este JSON sem markdown nem texto extra:
 {"nome":"","apartamento":"","bloco":"","telefone":"","rastreio":"","transportadora":"","remetente":""}
 Campos: nome do destinatário, apartamento, bloco, telefone, código de rastreio (ex: BR123456789BR), transportadora (Correios/Jadlog/Loggi/Shopee/etc), remetente (Amazon/Shein/etc).
-Se não visível deixe "". NÃO invente.`;
+Separe unidade e bloco: "BLOCO TESTE AP 999" significa bloco "TESTE" e apartamento "999". Rastreio deve conter apenas o código, sem a palavra RASTREIO. Se não visível deixe "". NÃO invente.`;
 
       const endpoint = getOllamaUrl().replace(/\/+$/, "") + "/api/chat";
       const res = await fetch(endpoint, {
@@ -1075,8 +1075,9 @@ Se não visível deixe "". NÃO invente.`;
           model:getOllamaModel(),
           messages:[{role:"user",content:prompt,images:[base64Data]}],
           format:"json",
+          think:false,
           stream:false,
-          options:{temperature:0}
+          options:{temperature:0,num_ctx:2048,num_predict:400}
         })
       });
       const data = await res.json().catch(()=>({}));
@@ -1126,11 +1127,11 @@ Se não visível deixe "". NÃO invente.`;
       console.error("OCR error:", err);
       const msg = err.message || "";
       if(msg.includes("Failed to fetch")||msg.includes("NetworkError")||msg.includes("fetch")||msg.includes("CORS")) {
-        alert("❌ Não consegui conectar ao Ollama.\n\nAbra o Ollama neste computador e instale o modelo qwen3.5:4b. Depois, tente novamente. Se o site estiver publicado, ele ainda precisa estar aberto neste mesmo computador e o Ollama precisa permitir a origem do site.");
+        alert("❌ Não consegui conectar ao Ollama.\n\nAbra o Ollama neste computador e instale o modelo qwen3.5:2b. Depois, tente novamente. Se o site estiver publicado, ele ainda precisa estar aberto neste mesmo computador e o Ollama precisa permitir a origem do site.");
       } else if(err.name==="TimeoutError"||err.name==="AbortError") {
         alert("⌛ A leitura demorou mais de 3 minutos e foi interrompida. Confira se o Ollama está respondendo, se o computador tem memória suficiente e se o modelo escolhido é adequado para este aparelho.");
       } else if(msg.includes("not found")||msg.includes("pull model")||msg.includes("model")) {
-        alert("❌ Modelo não encontrado no Ollama. Instale o qwen3.5:4b e tente de novo.\n\n" + msg);
+        alert("❌ Modelo não encontrado no Ollama. Instale o qwen3.5:2b e tente de novo.\n\n" + msg);
       } else {
         alert("❌ Erro ao ler etiqueta: " + msg + "\n\nPreencha os dados manualmente.");
       }
@@ -1940,7 +1941,7 @@ const Configuracoes = () => {
 
   const salvar = () => {
     try {
-      localStorage.setItem("px_ollama_model", ollamaModel.trim() || "qwen3.5:4b");
+      localStorage.setItem("px_ollama_model", ollamaModel.trim() || "qwen3.5:2b");
       localStorage.setItem("px_ollama_url", ollamaUrl.trim() || "http://localhost:11434");
       setSaved(true); setTimeout(()=>setSaved(false), 2500);
     } catch {
@@ -1974,8 +1975,8 @@ const Configuracoes = () => {
           </div>}
           <div className="f">
             <label>MODELO INSTALADO NO OLLAMA</label>
-            <input className="inp" value={ollamaModel} onChange={e=>{setOllamaModel(e.target.value);setSaved(false);}} placeholder="qwen3.5:4b"/>
-            <p style={{fontSize:11,color:"var(--t3)",marginTop:6}}>Recomendado para começar: qwen3.5:4b. Instale o mesmo nome no Ollama.</p>
+            <input className="inp" value={ollamaModel} onChange={e=>{setOllamaModel(e.target.value);setSaved(false);}} placeholder="qwen3.5:2b"/>
+            <p style={{fontSize:11,color:"var(--t3)",marginTop:6}}>Recomendado para começar: qwen3.5:2b. Instale o mesmo nome no Ollama.</p>
           </div>
           <div className="f">
             <label>ENDEREÇO DO OLLAMA NESTE COMPUTADOR</label>
@@ -1984,7 +1985,7 @@ const Configuracoes = () => {
           <div style={{margin:"16px 0",background:"#10b9810d",border:"1px solid #10b98133",borderRadius:"var(--rs)",padding:12,fontSize:12,color:"var(--t2)",lineHeight:1.6}}>
             <strong style={{color:"var(--gn)"}}>✅ Sem token e sem cobrança por consulta.</strong><br/>
             1. <a href="https://ollama.com/download" target="_blank" rel="noreferrer" style={{color:"var(--ac)"}}>Instale o Ollama</a> neste computador.<br/>
-            2. Instale o modelo <code>qwen3.5:4b</code> e mantenha o Ollama aberto.<br/>
+            2. Instale o modelo <code>qwen3.5:2b</code> e mantenha o Ollama aberto.<br/>
             3. No site publicado, permita no Ollama a origem HTTPS do site.<br/>
             As fotos da etiqueta são enviadas ao serviço Ollama configurado; use um endereço local e confiável.
           </div>
