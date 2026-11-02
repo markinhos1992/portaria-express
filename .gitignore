@@ -8,3 +8,6 @@ dist/
 coverage/
 playwright-report/
 test-results/
+
+# Arquivos locais de simulação e trabalho
+work/

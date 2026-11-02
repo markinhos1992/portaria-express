@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
 import { normalizeWhatsAppPhone } from "./whatsapp.js";
 import { OCR_SCHEMA, matchResidentName } from "./ocr-schema.js";
+import { fetchAllRows, fetchAllResult, csvCell, localOllamaUrl, parseCsv, validateImageFile } from "./data-safety.js";
 
 // A versão antiga guardava senhas em texto puro no navegador. Elas não são
 // usadas pela autenticação Supabase e são removidas no upgrade por segurança.
@@ -26,7 +27,7 @@ const getOllamaModel = () => {
   try { return localStorage.getItem("px_ollama_model") || "qwen3.5:2b"; } catch { return "qwen3.5:2b"; }
 };
 const getOllamaUrl = () => {
-  try { return localStorage.getItem("px_ollama_url") || "http://localhost:11434"; } catch { return "http://localhost:11434"; }
+  try { return localOllamaUrl(localStorage.getItem("px_ollama_url") || "http://localhost:11434"); } catch { return "http://localhost:11434"; }
 };
 
 // Acesso às tabelas novas protegido por sessão Supabase Auth e RLS por condomínio.
@@ -34,16 +35,15 @@ const db = {
   async getAll(table) {
     if(!supabaseClient || !ACTIVE_TENANT_ID) throw new Error("Sessão ou condomínio não configurado");
     const target=TENANT_TABLES[table]||table;
+    const tenantId=ACTIVE_TENANT_ID;
     const orderColumn=table==="logs"?"data":"criado_em";
-    let query=supabaseClient.from(target).select("*").eq("condominio_id",ACTIVE_TENANT_ID);
-    const {data,error}=await query.order(orderColumn,{ascending:false});
-    if(error) throw error;
-    return data||[];
+    return fetchAllRows(()=>supabaseClient.from(target).select("*").eq("condominio_id",tenantId).order(orderColumn,{ascending:false}).order("id"));
   },
   async insert(table, row) {
     if(!supabaseClient || !ACTIVE_TENANT_ID) throw new Error("Sessão ou condomínio não configurado");
+    const tenantId=ACTIVE_TENANT_ID;
     const target=TENANT_TABLES[table]||table;
-    const payload={...row,condominio_id:ACTIVE_TENANT_ID};
+    const payload={...row,condominio_id:tenantId};
     if(table==="logs") payload.usuario_id=(await supabaseClient.auth.getUser()).data.user?.id;
     const {data,error}=await supabaseClient.from(target).insert(payload).select().single();
     if(error) throw error;
@@ -51,18 +51,20 @@ const db = {
   },
   async update(table, id, row) {
     if(!supabaseClient || !ACTIVE_TENANT_ID) throw new Error("Sessão ou condomínio não configurado");
+    const tenantId=ACTIVE_TENANT_ID;
     const payload=table==="moradores"?{...row,atualizado_em:new Date().toISOString()}:row;
-    const {data,error}=await supabaseClient.from(TENANT_TABLES[table]||table).update(payload).eq("id",id).eq("condominio_id",ACTIVE_TENANT_ID).select().single();
+    const {data,error}=await supabaseClient.from(TENANT_TABLES[table]||table).update(payload).eq("id",id).eq("condominio_id",tenantId).select().single();
     if(error) throw error;
     return data;
   },
   async delete(table, id) {
     if(!supabaseClient || !ACTIVE_TENANT_ID) throw new Error("Sessão ou condomínio não configurado");
+    const tenantId=ACTIVE_TENANT_ID;
     let result;
     if(table==="encomendas"){
       const {data:{user}}=await supabaseClient.auth.getUser();
-      result=await supabaseClient.from(TENANT_TABLES[table]).update({arquivado_em:new Date().toISOString(),arquivado_por:user?.id||null}).eq("id",id).eq("condominio_id",ACTIVE_TENANT_ID).select("id");
-    } else result=await supabaseClient.from(TENANT_TABLES[table]||table).delete().eq("id",id).eq("condominio_id",ACTIVE_TENANT_ID).select("id");
+      result=await supabaseClient.from(TENANT_TABLES[table]).update({arquivado_em:new Date().toISOString(),arquivado_por:user?.id||null}).eq("id",id).eq("condominio_id",tenantId).select("id");
+    } else result=await supabaseClient.from(TENANT_TABLES[table]||table).delete().eq("id",id).eq("condominio_id",tenantId).select("id");
     const {data,error}=result;
     if(error) throw error;
     if(!data?.length) throw new Error("Nenhum registro foi alterado. Atualize a tela e tente novamente.");
@@ -71,11 +73,12 @@ const db = {
   async deleteBatch(table, ids) {
     if(!ids.length) return true;
     if(!supabaseClient || !ACTIVE_TENANT_ID) throw new Error("Sessão ou condomínio não configurado");
+    const tenantId=ACTIVE_TENANT_ID;
     let result;
     if(table==="encomendas"){
       const {data:{user}}=await supabaseClient.auth.getUser();
-      result=await supabaseClient.from(TENANT_TABLES[table]).update({arquivado_em:new Date().toISOString(),arquivado_por:user?.id||null}).in("id",ids).eq("condominio_id",ACTIVE_TENANT_ID).select("id");
-    } else result=await supabaseClient.from(TENANT_TABLES[table]||table).delete().in("id",ids).eq("condominio_id",ACTIVE_TENANT_ID).select("id");
+      result=await supabaseClient.from(TENANT_TABLES[table]).update({arquivado_em:new Date().toISOString(),arquivado_por:user?.id||null}).in("id",ids).eq("condominio_id",tenantId).select("id");
+    } else result=await supabaseClient.from(TENANT_TABLES[table]||table).delete().in("id",ids).eq("condominio_id",tenantId).select("id");
     const {data,error}=result;
     if(error) throw error;
     if((data||[]).length!==ids.length) throw new Error("Nem todos os registros foram alterados. Atualize a tela para sincronizar os dados.");
@@ -109,12 +112,13 @@ const fmtShort = iso => !iso ? "—" : new Date(iso).toLocaleDateString("pt-BR")
 const isToday  = iso => { if(!iso) return false; const d=new Date(iso),t=new Date(); return d.getDate()===t.getDate()&&d.getMonth()===t.getMonth()&&d.getFullYear()===t.getFullYear(); };
 const getDias  = iso => Math.floor((Date.now()-new Date(iso))/86400000);
 const simil    = (a,b) => { a=a.toLowerCase();b=b.toLowerCase();let m=0;const wa=a.split(" "),wb=b.split(" ");wa.forEach(w=>{if(wb.some(x=>x.includes(w)||w.includes(x)))m++;});return m/Math.max(wa.length,1); };
-const makeProto= () => { const d=new Date(); return `PX-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${String(Math.floor(Math.random()*9000)+1000).padStart(4,'0')}`; };
+const makeProto= () => { const d=new Date(); return `PX-${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}-${crypto.randomUUID().replace(/-/g,"").toUpperCase()}`; };
 const doExport = (data,name) => {
   if(!data.length) return;
   const keys=Object.keys(data[0]);
-  const rows=[keys.join(","),...data.map(r=>keys.map(k=>`"${String(r[k]||"").replace(/"/g,'""')}"`).join(","))];
-  const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([rows.join("\n")],{type:"text/csv"})); a.download=name; a.click();
+  const rows=[keys.map(csvCell).join(","),...data.map(r=>keys.map(k=>csvCell(r[k])).join(","))];
+  const url=URL.createObjectURL(new Blob(["\uFEFF"+rows.join("\r\n")],{type:"text/csv;charset=utf-8"}));
+  const a=document.createElement("a");a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -623,39 +627,47 @@ const ReadonlyBanner = () => (
 const Moradores = ({ moradores, setMoradores, user }) => {
   const [srch, setSrch] = useState(""); const [fb, setFb] = useState(""); const [modal, setModal] = useState(null); const [form, setForm] = useState({}); const [delId, setDelId] = useState(null);
   const importRef=useRef(null);
+  const mutationBusy=useRef(false);
+  const [busy,setBusy]=useState(false);
   const readonly = isReadonly(user.perfil, "moradores");
   const blocos = [...new Set(moradores.map(m=>m.bloco))].sort();
   const list = moradores.filter(m=>(!srch||m.nome.toLowerCase().includes(srch.toLowerCase())||m.apartamento.includes(srch))&&(!fb||m.bloco===fb));
   const save = async () => {
+    if(mutationBusy.current)return;
     if(!form.nome?.trim()||!form.apartamento?.trim()||!form.bloco?.trim()) return alert("Preencha nome, apartamento e bloco.");
     const row={nome:form.nome.trim(),apartamento:form.apartamento.trim(),bloco:form.bloco.trim(),telefone:form.telefone||"",whatsapp:form.whatsapp||"",obs:form.obs||"",ativo:!!form.ativo};
+    mutationBusy.current=true;setBusy(true);
     try {
       const saved=modal==="novo"?await db.insert("moradores",row):await db.update("moradores",form.id,row);
-      setMoradores(p=>modal==="novo"?[...p,saved].sort((a,b)=>a.nome.localeCompare(b.nome,"pt-BR")):p.map(m=>m.id===form.id?saved:m));
+      setMoradores(p=>modal==="novo"?[...p.filter(m=>m.id!==saved.id),saved].sort((a,b)=>a.nome.localeCompare(b.nome,"pt-BR")):p.map(m=>m.id===form.id?saved:m));
       setModal(null);
-    } catch(e) { alert("Não foi possível salvar o morador. Os dados continuam no formulário.\n\n"+(e.message||"Verifique a conexão.")); }
+    } catch(e) { alert("Não foi possível salvar o morador. Os dados continuam no formulário.\n\n"+(e.message||"Verifique a conexão.")); } finally {mutationBusy.current=false;setBusy(false);}
   };
   const lerCsv=async file=>{
-    if(!file)return;
+    if(!file||mutationBusy.current)return;
+    const importTenant=ACTIVE_TENANT_ID;mutationBusy.current=true;setBusy(true);
     try {
-      const text=(await file.text()).replace(/^\uFEFF/,"");
-      const linhas=text.split(/\r?\n/).filter(l=>l.trim());
-      if(linhas.length<2) throw new Error("O arquivo precisa ter cabeçalho e ao menos um morador.");
-      const delimiter=(linhas[0].match(/;/g)||[]).length>(linhas[0].match(/,/g)||[]).length?";":",";
-      const parse=line=>{const vals=[];let cur="",quoted=false;for(let i=0;i<line.length;i++){const ch=line[i];if(ch==='"'&&line[i+1]==='"'&&quoted){cur+='"';i++;}else if(ch==='"'){quoted=!quoted;}else if(ch===delimiter&&!quoted){vals.push(cur.trim());cur="";}else cur+=ch;}vals.push(cur.trim());return vals;};
+      if(file.size>2*1024*1024)throw new Error("O CSV deve ter até 2 MB.");
+      const parsed=parseCsv(await file.text());
+      if(parsed.length<2)throw new Error("O CSV precisa de cabeçalho e ao menos um morador.");
+      if(parsed.length>501)throw new Error("Importe até 500 moradores por arquivo para conferir cada lote.");
       const norm=s=>String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
-      const headers=parse(linhas[0]).map(norm);
+      const headers=parsed[0].map(norm);
+      if(new Set(headers).size!==headers.length)throw new Error("O cabeçalho contém colunas repetidas.");
       const find=(...keys)=>headers.findIndex(h=>keys.includes(h));
       const ix={nome:find("nome","morador","nomecompleto"),bloco:find("bloco","torre"),apartamento:find("apartamento","ap","unidade"),telefone:find("telefone","celular"),whatsapp:find("whatsapp"),obs:find("obs","observacoes","observacao")};
       if(ix.nome<0||ix.bloco<0||ix.apartamento<0) throw new Error("Inclua colunas com nome, bloco e apartamento. Telefone e WhatsApp são opcionais.");
-      const rows=linhas.slice(1).map(parse).map(c=>({nome:c[ix.nome]||"",bloco:c[ix.bloco]||"",apartamento:c[ix.apartamento]||"",telefone:ix.telefone>=0?c[ix.telefone]||"":"",whatsapp:ix.whatsapp>=0?c[ix.whatsapp]||"":"",obs:ix.obs>=0?c[ix.obs]||"":"",ativo:true,condominio_id:ACTIVE_TENANT_ID})).filter(r=>r.nome&&r.bloco&&r.apartamento);
+      const rows=parsed.slice(1).map((c,index)=>{if(c.length!==headers.length)throw new Error(`Quantidade de colunas inválida na linha ${index+2}.`);return ({nome:c[ix.nome]||"",bloco:c[ix.bloco]||"",apartamento:c[ix.apartamento]||"",telefone:ix.telefone>=0?c[ix.telefone]||"":"",whatsapp:ix.whatsapp>=0?c[ix.whatsapp]||"":"",obs:ix.obs>=0?c[ix.obs]||"":"",ativo:true,condominio_id:ACTIVE_TENANT_ID});});
+      if(rows.some(r=>!r.nome||!r.bloco||!r.apartamento))throw new Error("Todas as linhas devem informar nome, bloco e apartamento. Nenhum registro foi importado.");
+      const keys=new Set();for(const r of [...moradores,...rows]){const key=[r.nome,r.bloco,r.apartamento].map(norm).join("|");if(keys.has(key)&&rows.includes(r))throw new Error("Há moradores repetidos no arquivo ou já cadastrados. Revise antes de importar.");keys.add(key);}
       if(!rows.length) throw new Error("Não encontrei linhas válidas para importar.");
-      const {data,error}=await supabaseClient.from("portaria_moradores").insert(rows).select();
+      if(ACTIVE_TENANT_ID!==importTenant)throw new Error("O condomínio mudou durante a importação. Selecione o arquivo novamente.");
+      const {data,error}=await supabaseClient.from("portaria_moradores").insert(rows.map(r=>({...r,condominio_id:importTenant}))).select();
       if(error) throw error;
-      setMoradores(p=>[...p,...(data||[])].sort((a,b)=>a.nome.localeCompare(b.nome,"pt-BR")));
+      setMoradores(p=>[...p.filter(m=>!(data||[]).some(r=>r.id===m.id)),...(data||[])].sort((a,b)=>a.nome.localeCompare(b.nome,"pt-BR")));
       alert(`${data?.length||0} morador(es) importado(s).`);
     } catch(e) {alert("Falha na importação: "+(e.message||"Confira o CSV e tente novamente."));}
-    finally {if(importRef.current)importRef.current.value="";}
+    finally {mutationBusy.current=false;setBusy(false);if(importRef.current)importRef.current.value="";}
   };
   return (
     <div>
@@ -710,7 +722,7 @@ const Moradores = ({ moradores, setMoradores, user }) => {
               </div>
               <div className="f"><label>OBSERVAÇÕES</label><textarea className="inp" value={form.obs||""} onChange={e=>setForm({...form,obs:e.target.value})}/></div>
             </div>
-            <div className="mf"><button className="btn bg2" onClick={()=>setModal(null)}>Cancelar</button><button className="btn bp" onClick={save}>Salvar</button></div>
+            <div className="mf"><button className="btn bg2" onClick={()=>setModal(null)}>Cancelar</button><button className="btn bp" disabled={busy} onClick={save}>{busy?"Salvando…":"Salvar"}</button></div>
           </div>
         </div>
       )}
@@ -890,7 +902,7 @@ const FotoCapture = ({ img, setImg, onOCR, loading }) => {
             <p>Clique para escolher uma foto da galeria</p>
           </div>
           <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{
-            if(e.target.files[0]){
+            if(e.target.files[0]){try{validateImageFile(e.target.files[0]);}catch(error){alert(error.message);e.target.value="";return;}
               const r=new FileReader();
               r.onload=ev=>{ const dataUrl=ev.target.result; setImg(dataUrl); setMode("preview"); onOCR(dataUrl); };
               r.readAsDataURL(e.target.files[0]);
@@ -917,7 +929,7 @@ const FotoCapture = ({ img, setImg, onOCR, loading }) => {
       <label className="btn bs" style={{cursor:"pointer",width:"100%",justifyContent:"center"}}>
         Escolher foto da etiqueta
         <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{
-          const file=e.target.files?.[0];if(!file)return;
+          const file=e.target.files?.[0];if(!file)return;try{validateImageFile(file);}catch(error){alert(error.message);e.target.value="";return;}
           const reader=new FileReader();reader.onload=ev=>{setImg(ev.target.result);setMode("preview");onOCR(ev.target.result);};reader.readAsDataURL(file);
         }}/>
       </label>
@@ -1181,7 +1193,8 @@ Separe unidade e bloco: "BLOCO TESTE AP 999" significa bloco "TESTE" e apartamen
   };
 
   const handleSave = async () => {
-    if(!form.morador) return alert("Informe o morador.");
+    if(saving)return;
+    if(!form.morador?.trim()) return alert("Informe o morador.");
     setSaving(true);
     const enc = {protocolo:makeProto(),morador:form.morador,apartamento:form.apartamento,bloco:form.bloco,telefone:form.telefone,transportadora:form.transportadora,rastreio:form.rastreio,remetente:form.remetente,status:"pendente",criado_por:user.nome,criado_em:new Date().toISOString(),retirado_em:null,retirado_por:null};
     try {
@@ -1545,7 +1558,7 @@ const Encomendas = ({ encomendas, setEncomendas, moradores, user, addLog }) => {
   const retiradas = encomendas.filter(e => e.status==="retirada");
 
   const handleSave = enc => {
-    setEncomendas(p=>[enc,...p]);
+    setEncomendas(p=>[enc,...p.filter(e=>e.id!==enc.id)]);
     addLog({acao:"Encomenda criada",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});
     setPg(1);
   };
@@ -1726,6 +1739,7 @@ const Retirada = ({ encomendas, setEncomendas, user, addLog }) => {
   };
 
   const confirm = async () => {
+    if(saving)return;
     if(!photo) return alert("Foto de retirada obrigatória.");
     setSaving(true);
     const now=new Date().toISOString();
@@ -1739,12 +1753,13 @@ const Retirada = ({ encomendas, setEncomendas, user, addLog }) => {
       canvas.getContext("2d").drawImage(image,0,0,canvas.width,canvas.height);
       const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/jpeg",0.72));
       if(!blob)throw new Error("Não foi possível comprimir a foto.");
-      objectPath=`${ACTIVE_TENANT_ID}/${sel.id}/${crypto.randomUUID()}.jpg`;
+      if(ACTIVE_TENANT_ID!==user.condominio_id)throw new Error("O condomínio mudou. Abra a retirada novamente.");
+      objectPath=`${user.condominio_id}/${sel.id}/${crypto.randomUUID()}.jpg`;
       const {error:uploadError}=await supabaseClient.storage.from("portaria-comprovantes").upload(objectPath,blob,{contentType:"image/jpeg",upsert:false});
       if(uploadError)throw uploadError;
       const upd={status:"retirada",retirado_em:now,retirado_por:user.nome,comprovante_path:objectPath};
-      await db.update("encomendas",sel.id,upd);
-      setEncomendas(p=>p.map(e=>e.id===sel.id?{...e,...upd}:e));
+      const persisted=await db.update("encomendas",sel.id,upd);
+      setEncomendas(p=>p.map(e=>e.id===sel.id?{...e,...persisted}:e));
       await addLog({acao:"Retirada confirmada",protocolo:sel.protocolo,usuario:user.nome,data:now});
       setDone(true);
     } catch(e) {
@@ -1857,7 +1872,7 @@ const Retirada = ({ encomendas, setEncomendas, user, addLog }) => {
                     <label>FOTO DE RETIRADA *</label>
                     <div className="uz" onClick={()=>fRef.current?.click()}>
                       <Icon n="camera"/><p>Foto de quem está retirando a encomenda</p>
-                      <input ref={fRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>{if(e.target.files[0]){const r=new FileReader();r.onload=ev=>setPhoto(ev.target.result);r.readAsDataURL(e.target.files[0])}}}/>
+                      <input ref={fRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>{if(e.target.files[0]){try{validateImageFile(e.target.files[0]);}catch(error){alert(error.message);e.target.value="";return;}const r=new FileReader();r.onload=ev=>setPhoto(ev.target.result);r.readAsDataURL(e.target.files[0])}}}/>
                     </div>
                     {photo&&<img src={photo} className="prev" alt="foto"/>}
                   </div>
@@ -1955,7 +1970,7 @@ const Logs = ({ logs }) => (
       <thead><tr><th>#</th><th>Ação</th><th>Protocolo</th><th>Usuário</th><th>Data/Hora</th></tr></thead>
       <tbody>
         {logs.length===0&&<tr><td colSpan={5}><div className="empty"><Icon n="log"/><p>Nenhum log</p></div></td></tr>}
-        {[...logs].reverse().map((l,i)=>(
+        {[...logs].sort((a,b)=>new Date(b.data)-new Date(a.data)).map((l,i)=>(
           <tr key={l.id||i}>
             <td style={{color:"var(--t3)",fontSize:11}}>{logs.length-i}</td>
             <td><span className="badge bb">{l.acao}</span></td>
@@ -1981,8 +1996,9 @@ const Configuracoes = () => {
 
   const salvar = () => {
     try {
+      const validatedUrl=localOllamaUrl(ollamaUrl.trim()||"http://localhost:11434");
       localStorage.setItem("px_ollama_model", ollamaModel.trim() || "qwen3.5:2b");
-      localStorage.setItem("px_ollama_url", ollamaUrl.trim() || "http://localhost:11434");
+      localStorage.setItem("px_ollama_url", validatedUrl);
       setSaved(true); setTimeout(()=>setSaved(false), 2500);
     } catch {
       setSaved(false);
@@ -2033,7 +2049,7 @@ const Configuracoes = () => {
           <button className="btn bs" disabled={connectionStatus==="Testando…"} onClick={async()=>{
             setConnectionStatus("Testando…");
             try {
-              const response=await fetch(ollamaUrl.trim().replace(/\/+$/,"")+"/api/tags",{signal:AbortSignal.timeout(10_000)});
+              const response=await fetch(localOllamaUrl(ollamaUrl.trim())+"/api/tags",{signal:AbortSignal.timeout(10_000)});
               if(!response.ok)throw new Error(response.status===403?"Ollama bloqueou a origem do site. Configure OLLAMA_ORIGINS e reinicie o Ollama.":"HTTP "+response.status);
               const data=await response.json();
               const installed=(data.models||[]).some(m=>m.name===ollamaModel.trim()||m.model===ollamaModel.trim());
@@ -2133,7 +2149,7 @@ _Portaria Express_`;
     const num = normalizeWhatsAppPhone(tel);
     if(!num) return alert("Telefone inválido. Informe DDD e número, com ou sem +55.");
     const msg = encodeURIComponent(msgOverride || msgPadrao(enc));
-    window.open(`https://wa.me/${num}?text=${msg}`, "_blank");
+    window.open(`https://wa.me/${num}?text=${msg}`, "_blank", "noopener,noreferrer");
     setEnviados(p=>({...p,[enc.id]:true}));
   };
 
@@ -2370,8 +2386,8 @@ function App() {
       ACTIVE_TENANT_ID=member.condominio_id;
       const [condoResult,residentsResult,packagesResult,logsResult]=await Promise.all([
         Promise.resolve({data:{id:member.condominio_id,nome:member.nome_condominio},error:null}),
-        supabaseClient.from("portaria_moradores").select("*").eq("condominio_id",member.condominio_id).order("nome"),
-        supabaseClient.from("portaria_encomendas").select("*").eq("condominio_id",member.condominio_id).order("criado_em",{ascending:false}),
+        fetchAllResult(()=>supabaseClient.from("portaria_moradores").select("*").eq("condominio_id",member.condominio_id).order("nome").order("id")),
+        fetchAllResult(()=>supabaseClient.from("portaria_encomendas").select("*").eq("condominio_id",member.condominio_id).order("criado_em",{ascending:false}).order("id")),
         supabaseClient.from("portaria_auditoria").select("*").eq("condominio_id",member.condominio_id).order("data",{ascending:false}).limit(1000)
       ]);
       if(requestId!==loadRequestRef.current)return;
@@ -2386,7 +2402,7 @@ function App() {
 
   useEffect(()=>{
     if(!authReady)return;
-    if(!session){ACTIVE_TENANT_ID=null;setUser(null);setNeedsSetup(false);return;}
+    if(!session){++loadRequestRef.current;ACTIVE_TENANT_ID=null;setUser(null);setMor([]);setEnc([]);setLogs([]);setTenantOptions([]);setNeedsSetup(false);setDataLoading(false);return;}
     loadTenant(session);
   },[authReady,session?.user?.id]);
 
@@ -2438,10 +2454,10 @@ function App() {
 
   const addLog=useCallback(async(event)=>{
     if(!supabaseClient||!ACTIVE_TENANT_ID||!session?.user?.id)return;
-    const row={...event,condominio_id:ACTIVE_TENANT_ID,usuario_id:session.user.id};
-    const {data,error}=await supabaseClient.from("portaria_auditoria").insert(row).select().single();
-    if(error){setDataError("A ação foi concluída, mas o registro de auditoria falhou: "+error.message);return;}
-    setLogs(p=>[data,...p].slice(0,1000));
+    const tenantId=event.condominio_id||ACTIVE_TENANT_ID;
+    const {data,error}=await supabaseClient.from("portaria_auditoria").select("*").eq("condominio_id",tenantId).order("data",{ascending:false}).limit(1000);
+    if(error){setDataError("A ação foi concluída. Não foi possível atualizar a exibição da auditoria: "+error.message);return;}
+    if(ACTIVE_TENANT_ID===tenantId)setLogs(data||[]);
   },[session?.user?.id]);
 
   useEffect(()=>{
@@ -2479,17 +2495,17 @@ function App() {
       {dataError&&<div role="alert" className="offbanner" style={{margin:"12px 24px 0"}}><strong>Problema de sincronização:</strong> {dataError}<button className="btn bs bsm" style={{marginLeft:10}} onClick={()=>loadTenant(session)}>Tentar novamente</button></div>}
       <div className="pg">
         {page==="dashboard"&&<Dashboard encomendas={encomendas.filter(e=>!e.arquivado_em)} moradores={moradores}/>}
-        {page==="encomendas"&&<Encomendas encomendas={encomendas.filter(e=>!e.arquivado_em)} setEncomendas={setEnc} moradores={moradores} user={user} addLog={addLog}/>}
-        {page==="retirada"&&<Retirada encomendas={encomendas.filter(e=>!e.arquivado_em)} setEncomendas={setEnc} user={user} addLog={addLog}/>}
-        {page==="moradores"&&<Moradores moradores={moradores} setMoradores={setMor} user={user}/>}
-        {page==="relatorios"&&<Relatorios encomendas={encomendas} user={user}/>}
+        {page==="encomendas"&&<Encomendas key={user.condominio_id} encomendas={encomendas.filter(e=>!e.arquivado_em)} setEncomendas={fn=>setEnc(p=>ACTIVE_TENANT_ID===user.condominio_id?fn(p):p)} moradores={moradores} user={user} addLog={event=>addLog({...event,condominio_id:user.condominio_id})}/>}
+        {page==="retirada"&&<Retirada key={user.condominio_id} encomendas={encomendas.filter(e=>!e.arquivado_em)} setEncomendas={fn=>setEnc(p=>ACTIVE_TENANT_ID===user.condominio_id?fn(p):p)} user={user} addLog={event=>addLog({...event,condominio_id:user.condominio_id})}/>}
+        {page==="moradores"&&<Moradores key={user.condominio_id} moradores={moradores} setMoradores={fn=>setMor(p=>ACTIVE_TENANT_ID===user.condominio_id?fn(p):p)} user={user}/>}
+        {page==="relatorios"&&<Relatorios key={user.condominio_id} encomendas={encomendas} user={user}/>}
         {page==="logs"&&<Logs logs={logs}/>}
-        {page==="notificacoes"&&<Notificacoes encomendas={encomendas.filter(e=>!e.arquivado_em)} moradores={moradores}/>}
+        {page==="notificacoes"&&<Notificacoes key={user.condominio_id} encomendas={encomendas.filter(e=>!e.arquivado_em)} moradores={moradores}/>}
         {page==="xwriter"&&<XWriter/>}
-        {page==="usuarios"&&<Usuarios condominioId={user.condominio_id} currentUserId={session.user.id}/>}
+        {page==="usuarios"&&<Usuarios key={user.condominio_id} condominioId={user.condominio_id} currentUserId={session.user.id}/>}
         {page==="configuracoes"&&<Configuracoes/>}
       </div>
-      {quickEnc&&<NovaModal moradores={moradores} onSave={async enc=>{setEnc(p=>[enc,...p]);await addLog({acao:"Encomenda criada",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});setQuickEnc(false);}} onClose={()=>setQuickEnc(false)} user={user}/>}
+      {quickEnc&&<NovaModal key={user.condominio_id} moradores={moradores} onSave={async enc=>{setEnc(p=>ACTIVE_TENANT_ID===user.condominio_id?[enc,...p.filter(e=>e.id!==enc.id)]:p);await addLog({acao:"Encomenda criada",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});}} onClose={()=>setQuickEnc(false)} user={user}/>}
     </div>
     <nav className="mob-nav"><div className="mob-nav-inner">{mobNav.map(n=><div key={n.id} className={"mob-ni"+(page===n.id?" on":"")} onClick={()=>navigate(n.id)}><Icon n={n.i}/><span>{n.l}</span></div>)}</div></nav>
   </div></>;
