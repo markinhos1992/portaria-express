@@ -1,0 +1,12 @@
+import {rolldown} from 'rolldown';
+import fs from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+const bundle=await rolldown({input:'src/recovery.js'});
+const {output}=await bundle.generate({format:'iife',codeSplitting:false});await bundle.close();
+const chunks=output.filter(item=>item.type==='chunk');if(chunks.length!==1)throw new Error('A recuperação deve funcionar em um único arquivo.');
+const code=chunks[0].code.replace(/<\/script/gi,'<\\/script');
+const hash=createHash('sha256').update(code).digest('base64');
+let html=await fs.readFile('recuperar.html','utf8');
+html=html.replace("script-src 'self'",`script-src 'sha256-${hash}'`).replace('<script type="module" src="/src/recovery.js"></script>',()=>`<script>${code}</script>`);
+html=html.replace('Abra uma cópia protegida','Salve este arquivo HTML junto das cópias para poder abri-lo sem internet. Abra uma cópia protegida');
+await fs.mkdir('public',{recursive:true});await fs.writeFile('public/recuperar-offline.html',html);

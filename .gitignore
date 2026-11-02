@@ -11,3 +11,5 @@ test-results/
 
 # Arquivos locais de simulação e trabalho
 work/
+
+public/recuperar-offline.html

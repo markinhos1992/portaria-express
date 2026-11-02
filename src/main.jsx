@@ -1,3 +1,4 @@
+import BackupPanel from "./BackupPanel.jsx";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient } from "@supabase/supabase-js";
@@ -97,7 +98,7 @@ const MOCK_LOGS = [];
 
 // ─── PERMISSÕES ───────────────────────────────────────────────────────────────
 const PERMS = {
-  admin:    ["dashboard","encomendas","retirada","moradores","usuarios","notificacoes","relatorios","logs","configuracoes","xwriter"],
+  admin:    ["dashboard","encomendas","retirada","moradores","usuarios","notificacoes","relatorios","logs","configuracoes","xwriter","backup"],
   porteiro: ["dashboard","encomendas","retirada","moradores","notificacoes","relatorios","logs","xwriter"],
 };
 const READONLY = {
@@ -119,6 +120,11 @@ const doExport = (data,name) => {
   const rows=[keys.map(csvCell).join(","),...data.map(r=>keys.map(k=>csvCell(r[k])).join(","))];
   const url=URL.createObjectURL(new Blob(["\uFEFF"+rows.join("\r\n")],{type:"text/csv;charset=utf-8"}));
   const a=document.createElement("a");a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+
+const Pager=({page,total,size,onChange,label})=>{
+ const pages=Math.max(1,Math.ceil(total/size));
+ return <nav aria-label={label} style={{display:"flex",gap:12,alignItems:"center",justifyContent:"flex-end",padding:14,flexWrap:"wrap"}}><span>{total} registros · página {page} de {pages}</span><button className="btn bs" disabled={page<=1} onClick={()=>onChange(page-1)}>Anterior</button><button className="btn bs" disabled={page>=pages} onClick={()=>onChange(page+1)}>Próxima</button></nav>;
 };
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -532,7 +538,7 @@ const ResetPassword = ({onComplete}) => {
 
 // ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 const Sidebar = ({ page, setPage, user, onLogout }) => {
-  const allNav = [{sec:"PRINCIPAL"},{id:"dashboard",l:"Dashboard",i:"dashboard"},{id:"encomendas",l:"Encomendas",i:"package"},{id:"retirada",l:"Retirada",i:"check"},{sec:"GESTÃO"},{id:"moradores",l:"Moradores",i:"users"},{id:"usuarios",l:"Usuários",i:"key"},{id:"notificacoes",l:"Notificações",i:"notify"},{id:"xwriter",l:"Twitter / X",i:"x"},{id:"relatorios",l:"Relatórios",i:"report"},{id:"logs",l:"Auditoria",i:"log"},{sec:"SISTEMA"},{id:"configuracoes",l:"Configurações",i:"gear"}];
+  const allNav = [{sec:"PRINCIPAL"},{id:"dashboard",l:"Dashboard",i:"dashboard"},{id:"encomendas",l:"Encomendas",i:"package"},{id:"retirada",l:"Retirada",i:"check"},{sec:"GESTÃO"},{id:"moradores",l:"Moradores",i:"users"},{id:"usuarios",l:"Usuários",i:"key"},{id:"notificacoes",l:"Notificações",i:"notify"},{id:"xwriter",l:"Twitter / X",i:"x"},{id:"relatorios",l:"Relatórios",i:"report"},{id:"logs",l:"Auditoria",i:"log"},{sec:"SISTEMA"},{id:"backup",l:"Backup e recuperação",i:"download"},{id:"configuracoes",l:"Configurações",i:"gear"}];
   const nav = allNav.filter((item,index) => item.id ? canAccess(user.perfil,item.id) : allNav.slice(index+1).some(next => !next.sec && canAccess(user.perfil,next.id)));
   return (
     <div className="sb">
@@ -626,12 +632,15 @@ const ReadonlyBanner = () => (
 // ─── MORADORES ────────────────────────────────────────────────────────────────
 const Moradores = ({ moradores, setMoradores, user }) => {
   const [srch, setSrch] = useState(""); const [fb, setFb] = useState(""); const [modal, setModal] = useState(null); const [form, setForm] = useState({}); const [delId, setDelId] = useState(null);
+  const [page,setPage]=useState(1);
+  useEffect(()=>setPage(1),[srch,fb]);
   const importRef=useRef(null);
   const mutationBusy=useRef(false);
   const [busy,setBusy]=useState(false);
   const readonly = isReadonly(user.perfil, "moradores");
   const blocos = [...new Set(moradores.map(m=>m.bloco))].sort();
   const list = moradores.filter(m=>(!srch||m.nome.toLowerCase().includes(srch.toLowerCase())||m.apartamento.includes(srch))&&(!fb||m.bloco===fb));
+  const currentPage=Math.min(page,Math.max(1,Math.ceil(list.length/50)));
   const save = async () => {
     if(mutationBusy.current)return;
     if(!form.nome?.trim()||!form.apartamento?.trim()||!form.bloco?.trim()) return alert("Preencha nome, apartamento e bloco.");
@@ -687,7 +696,7 @@ const Moradores = ({ moradores, setMoradores, user }) => {
         <thead><tr><th>Nome</th><th>Bloco/Ap</th><th>Telefone</th><th>Status</th><th>Ações</th></tr></thead>
         <tbody>
           {list.length===0&&<tr><td colSpan={5}><div className="empty"><Icon n="users"/><p>Nenhum morador</p></div></td></tr>}
-          {list.map(m=>(
+          {list.slice((currentPage-1)*50,currentPage*50).map(m=>(
             <tr key={m.id}>
               <td><strong>{m.nome}</strong>{m.obs&&<><br/><span style={{fontSize:11,color:"var(--t3)"}}>{m.obs}</span></>}</td>
               <td>Bl <strong>{m.bloco}</strong> / Ap <strong>{m.apartamento}</strong></td>
@@ -700,7 +709,7 @@ const Moradores = ({ moradores, setMoradores, user }) => {
             </tr>
           ))}
         </tbody>
-      </table></div></div>
+      </table></div><Pager page={currentPage} total={list.length} size={50} onChange={setPage} label="Páginas de moradores"/></div>
       {(modal==="novo"||modal==="editar")&&(
         <div className="ov" onClick={()=>setModal(null)}>
           <div className="modal" onClick={e=>e.stopPropagation()}>
@@ -1901,6 +1910,7 @@ const Retirada = ({ encomendas, setEncomendas, user, addLog }) => {
 
 // ─── RELATÓRIOS ───────────────────────────────────────────────────────────────
 const Relatorios = ({ encomendas, user }) => {
+  const [page,setPage]=useState(1);
   const [comprovante,setComprovante]=useState(null);
   const abrirComprovante=async enc=>{
     try {
@@ -1911,6 +1921,7 @@ const Relatorios = ({ encomendas, user }) => {
   };
   const readonly = isReadonly(user.perfil, "relatorios");
   const [fs,setFs]=useState(""); const [fb,setFb]=useState(""); const [fm,setFm]=useState(""); const [di,setDi]=useState(""); const [df,setDf]=useState("");
+  useEffect(()=>setPage(1),[fs,fb,fm,di,df]);
   const blocos=[...new Set(encomendas.map(e=>e.bloco))].sort();
   const list=encomendas.filter(e=>{
     if(fs&&e.status!==fs) return false;
@@ -1920,6 +1931,7 @@ const Relatorios = ({ encomendas, user }) => {
     if(df&&new Date(e.criado_em)>new Date(df+"T23:59:59")) return false;
     return true;
   }).sort((a,b)=>new Date(b.criado_em)-new Date(a.criado_em));
+  const currentPage=Math.min(page,Math.max(1,Math.ceil(list.length/100)));
   return (
     <div>
       <div className="card" style={{marginBottom:20}}>
@@ -1943,7 +1955,7 @@ const Relatorios = ({ encomendas, user }) => {
           <thead><tr><th>Protocolo</th><th>Morador</th><th>Bloco/Ap</th><th>Transportadora</th><th>Status</th><th>Recebida</th><th>Retirada</th></tr></thead>
           <tbody>
             {list.length===0&&<tr><td colSpan={7}><div className="empty"><Icon n="report"/><p>Sem registros</p></div></td></tr>}
-            {list.map(e=>(
+            {list.slice((currentPage-1)*100,currentPage*100).map(e=>(
               <tr key={e.id}>
                 <td><code style={{fontSize:11,color:"var(--t3)"}}>{e.protocolo}</code></td>
                 <td><strong>{e.morador}</strong>{e.arquivado_em&&<><br/><span className="badge bb">Arquivada</span></>}</td>
@@ -1955,7 +1967,7 @@ const Relatorios = ({ encomendas, user }) => {
               </tr>
             ))}
           </tbody>
-        </table></div>
+        </table></div><Pager page={currentPage} total={list.length} size={100} onChange={setPage} label="Páginas do relatório"/>
       </div>
       {comprovante&&<div className="ov" onClick={()=>setComprovante(null)}><div className="modal" onClick={e=>e.stopPropagation()}><div className="mh"><h3>Comprovante {comprovante.protocolo}</h3><button className="btn bs" onClick={()=>setComprovante(null)}>Fechar</button></div><div className="mb"><img src={comprovante.url} alt="Comprovante de retirada" style={{maxWidth:"100%"}}/><p>Visualização privada temporária. O link expira em 1 minuto.</p></div></div></div>}
     </div>
@@ -1963,16 +1975,18 @@ const Relatorios = ({ encomendas, user }) => {
 };
 
 // ─── LOGS ─────────────────────────────────────────────────────────────────────
-const Logs = ({ logs }) => (
+const Logs = ({ logs }) => {
+ const [page,setPage]=useState(1);const currentPage=Math.min(page,Math.max(1,Math.ceil(logs.length/100)));
+ return (
   <div className="card">
     <div className="ch"><h3>Logs de Auditoria</h3><p>{logs.length} registros</p></div>
     <div className="tw"><table>
       <thead><tr><th>#</th><th>Ação</th><th>Protocolo</th><th>Usuário</th><th>Data/Hora</th></tr></thead>
       <tbody>
         {logs.length===0&&<tr><td colSpan={5}><div className="empty"><Icon n="log"/><p>Nenhum log</p></div></td></tr>}
-        {[...logs].sort((a,b)=>new Date(b.data)-new Date(a.data)).map((l,i)=>(
+        {[...logs].sort((a,b)=>new Date(b.data)-new Date(a.data)).slice((currentPage-1)*100,currentPage*100).map((l,i)=>(
           <tr key={l.id||i}>
-            <td style={{color:"var(--t3)",fontSize:11}}>{logs.length-i}</td>
+            <td style={{color:"var(--t3)",fontSize:11}}>{logs.length-((currentPage-1)*100+i)}</td>
             <td><span className="badge bb">{l.acao}</span></td>
             <td><code style={{fontSize:11,color:"var(--t3)"}}>{l.protocolo}</code></td>
             <td><strong>{l.usuario}</strong></td>
@@ -1980,9 +1994,9 @@ const Logs = ({ logs }) => (
           </tr>
         ))}
       </tbody>
-    </table></div>
+    </table></div><Pager page={currentPage} total={logs.length} size={100} onChange={setPage} label="Páginas de auditoria"/>
   </div>
-);
+);};
 
 // ─── CONFIGURAÇÕES ────────────────────────────────────────────────────────────
 const Configuracoes = () => {
@@ -2307,6 +2321,7 @@ const XWriter = () => {
 };
 
 const META = {
+  backup: {title:"Backup e recuperação", desc:"Cópia protegida e consulta de emergência"},
   dashboard:     {title:"Dashboard",       desc:"Visão geral do sistema"},
   encomendas:    {title:"Encomendas",      desc:"Registrar e gerenciar encomendas"},
   retirada:      {title:"Retirada",        desc:"Confirmar retirada de pacotes"},
@@ -2503,6 +2518,7 @@ function App() {
         {page==="notificacoes"&&<Notificacoes key={user.condominio_id} encomendas={encomendas.filter(e=>!e.arquivado_em)} moradores={moradores}/>}
         {page==="xwriter"&&<XWriter/>}
         {page==="usuarios"&&<Usuarios key={user.condominio_id} condominioId={user.condominio_id} currentUserId={session.user.id}/>}
+        {page==="backup"&&<BackupPanel key={user.condominio_id} client={supabaseClient} user={user}/>}
         {page==="configuracoes"&&<Configuracoes/>}
       </div>
       {quickEnc&&<NovaModal key={user.condominio_id} moradores={moradores} onSave={async enc=>{setEnc(p=>ACTIVE_TENANT_ID===user.condominio_id?[enc,...p.filter(e=>e.id!==enc.id)]:p);await addLog({acao:"Encomenda criada",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});}} onClose={()=>setQuickEnc(false)} user={user}/>}

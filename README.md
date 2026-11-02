@@ -58,3 +58,13 @@ Planos pagos, cobrança recorrente, emissão fiscal e atendimento com prazo gara
 O workflow em `.github/workflows/deploy-pages.yml` compila e publica a pasta `dist`. Na primeira configuração, abra **Settings → Pages** no GitHub e selecione **GitHub Actions** como fonte. Antes da publicação, valide o fluxo real de autenticação, confirme que a chave antiga foi removida de todo o histórico público e conclua as verificações do piloto. A chave foi revogada; um commit novo, sozinho, não apaga o segredo dos commits antigos, então o histórico ainda precisa ser reescrito.
 
 O arquivo `atualizar.bat` é um atalho legado para envio direto à branch principal. Antes de usá-lo, revise os arquivos que serão publicados e confirme que o segredo antigo foi revogado.
+
+## Cópia protegida e consulta de emergência
+
+Administradores podem usar Backup e recuperação para exportar moradores, encomendas, todos os eventos de auditoria acessíveis e fotos referenciadas. Limite: 20 MB antes da criptografia. Senha de pelo menos 12 caracteres; AES-GCM e PBKDF2. Guarde senha e arquivo separadamente e teste semanalmente a abertura.
+
+O leitor permite consultar moradores, encomendas e auditoria com busca e paginação. Baixe também o leitor HTML independente para consulta sem internet. Fechar e limpar invalida aberturas pendentes e remove conteúdo e fotos da tela.
+
+A exportação recusa fotos ausentes e compara novamente as tabelas após coletar os comprovantes. Essa verificação detecta alterações concorrentes, mas não equivale a um snapshot transacional do servidor. Gere a cópia durante uma pausa operacional. Para garantias transacionais e volumes maiores, implemente backup administrativo do banco e do armazenamento.
+
+A cópia NÃO inclui contas de autenticação, senhas, configurações do Supabase ou código. O leitor é somente para consulta: restauração em produção exige procedimento administrativo separado, ensaiado primeiro em ambiente isolado. Não há agendamento automático de backups nem exclusão automática por retenção.
