@@ -1507,7 +1507,7 @@ const Encomendas = ({ encomendas, setEncomendas, moradores, user, addLog }) => {
   const handleSave = enc => {
     setEncomendas(p=>[enc,...p]);
     addLog({acao:"Encomenda criada",protocolo:enc.protocolo,usuario:user.nome,data:new Date().toISOString()});
-    setShowModal(false); setPg(1);
+    setPg(1);
   };
 
   const excluirUm = async (id) => {
@@ -1846,6 +1846,14 @@ const Retirada = ({ encomendas, setEncomendas, user, addLog }) => {
 
 // ─── RELATÓRIOS ───────────────────────────────────────────────────────────────
 const Relatorios = ({ encomendas, user }) => {
+  const [comprovante,setComprovante]=useState(null);
+  const abrirComprovante=async enc=>{
+    try {
+      const {data,error}=await supabaseClient.storage.from("portaria-comprovantes").createSignedUrl(enc.comprovante_path,60);
+      if(error)throw error;
+      setComprovante({url:data.signedUrl,protocolo:enc.protocolo});
+    } catch(e) { alert("Não foi possível abrir o comprovante. "+(e.message||"Tente novamente.")); }
+  };
   const readonly = isReadonly(user.perfil, "relatorios");
   const [fs,setFs]=useState(""); const [fb,setFb]=useState(""); const [fm,setFm]=useState(""); const [di,setDi]=useState(""); const [df,setDf]=useState("");
   const blocos=[...new Set(encomendas.map(e=>e.bloco))].sort();
@@ -1888,12 +1896,13 @@ const Relatorios = ({ encomendas, user }) => {
                 <td>{e.transportadora||"—"}</td>
                 <td><span className={`badge ${e.status==="pendente"?"by":"bg"}`}>{e.status==="pendente"?"⏳ Pendente":"✓ Retirada"}</span></td>
                 <td style={{fontSize:11}}>{fmtDate(e.criado_em)}</td>
-                <td style={{fontSize:11}}>{fmtDate(e.retirado_em)}{e.retirado_por&&<><br/><span style={{color:"var(--t3)"}}>{e.retirado_por}</span></>}</td>
+                <td style={{fontSize:11}}>{fmtDate(e.retirado_em)}{e.retirado_por&&<><br/><span style={{color:"var(--t3)"}}>{e.retirado_por}</span></>}{e.comprovante_path&&<><br/><button className="btn bs" onClick={()=>abrirComprovante(e)}>Ver comprovante</button></>}</td>
               </tr>
             ))}
           </tbody>
         </table></div>
       </div>
+      {comprovante&&<div className="ov" onClick={()=>setComprovante(null)}><div className="modal" onClick={e=>e.stopPropagation()}><div className="mh"><h3>Comprovante {comprovante.protocolo}</h3><button className="btn bs" onClick={()=>setComprovante(null)}>Fechar</button></div><div className="mb"><img src={comprovante.url} alt="Comprovante de retirada" style={{maxWidth:"100%"}}/><p>Visualização privada temporária. O link expira em 1 minuto.</p></div></div></div>}
     </div>
   );
 };
@@ -2159,7 +2168,7 @@ _Portaria Express_`;
               <button className="btn bg2" onClick={()=>setMsgCustom(null)}>Cancelar</button>
               <button className="btn bs" onClick={()=>{navigator.clipboard?.writeText(msgCustom.texto).then(()=>alert("Copiado!"));setMsgCustom(null);}}>📋 Copiar</button>
               <button className="btn bgr" onClick={()=>{abrirWA(msgCustom.enc,msgCustom.texto);setMsgCustom(null);}}>
-                <Icon n="whatsapp"/> Enviar WhatsApp
+                <Icon n="whatsapp"/> Abrir WhatsApp
               </button>
             </div>
           </div>
